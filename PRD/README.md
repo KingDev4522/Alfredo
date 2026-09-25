@@ -97,7 +97,7 @@ IDs are stable. Retired IDs must not be reused.
 ## Product decisions still required
 
 1. Final product name and “Interpret” versus “Translate” terminology.
-2. Whether release bundles an approved starter recognition library or launches calibration-first.
+2. Whether release bundles an approved starter recognition library, supports an approved import-only setup, or launches calibration-first.
 3. Final ISL vocabulary, variants, hand-count metadata, and high-stakes word policy.
 4. Whether/how ambiguous Good / Bad is represented.
 5. Supported browser/device/OS matrix.

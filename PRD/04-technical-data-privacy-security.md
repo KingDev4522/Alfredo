@@ -128,7 +128,7 @@ flowchart LR
 | `CameraAdapter` | `getUserMedia`, negotiated constraints, mirror/crop, track events, explicit stop | MediaPipe creation or React state |
 | `HandTrackingAdapter` | MediaPipe initialization, delegate policy, detection, model close | Page-specific UI or recording labels |
 | `AdaptiveQualityController` | Frame cadence, dropped frames, approved processing-scale changes, recovery | Arbitrary unvalidated thresholds |
-| `CaptureController` | Countdown/capture/cancel/watchdog, immutable vocabulary snapshot, timing | Final persistence/validation policy |
+| `CaptureController` | Countdown/capture/cancel/watchdog, Start-time vocabulary/metadata snapshot, capture start/end timestamps | Final persistence/validation policy |
 | `RecordingValidator` | Structural and quality checks, warnings, eligibility | UI copy/storage transactions |
 | `RecordingRepository` | IndexedDB lifecycle, transactions, migrations, queries, deletion | React rendering/DTW |
 | `VocabularyRepository` | Built-in/custom schema, stable IDs, labels, migration, synchronization | Frame capture |
@@ -255,7 +255,9 @@ type Recording = {
   vocabularyId: string
   labelAtCapture: string
   vocabularyVersion: number
-  recordedAt: string              // ISO timestamp
+  captureStartedAt: string        // ISO timestamp bound when capture begins
+  captureEndedAt: string          // ISO timestamp bound when capture finishes
+  recordedAt: string              // ISO persistence timestamp; not a substitute for capture timing
   recordedBy?: string             // user-entered; sensitive free text
   conditionLabel?: string
   expectedHands: 1 | 2 | "variable"
@@ -342,15 +344,23 @@ type Segment = {
 ### 8.5 Recognition outcome
 
 ```ts
-type RecognitionStatus =
-  | "no-templates"
-  | "interrupted"
-  | "accepted"
-  | "not-accepted"
+type LibraryReadiness =
+  | "no-usable-templates"
+  | "partial"
+  | "ready"
 
-type NotAcceptedReason =
-  | "below-threshold"
+type SessionAvailability =
+  | "ready"
+  | "unavailable"
+
+type RecognitionStatus =
+  | "accepted"
   | "ambiguous"
+  | "not-recognized"
+  | "interrupted"
+
+type NotRecognizedReason =
+  | "below-threshold"
   | "unknown"
   | "policy-error"
 
@@ -359,32 +369,73 @@ type RecognitionScore = {
   value: number
 }
 
-type RecognitionOutcome = {
-  status: RecognitionStatus
-  reason?: NotAcceptedReason
-  candidate?: {
-    vocabularyId: string
-    label: string
-    score: RecognitionScore
-  }
-  alternatives?: Array<{
-    vocabularyId: string
-    label: string
-    score: RecognitionScore
-  }>
+type CandidateEvidence = {
+  vocabularyId: string
+  label: string
+  score: RecognitionScore
+}
+
+type RecognitionBase = {
   segmentQuality: SegmentQuality
   policyVersion: string
   diagnosticsId?: string
 }
+
+type RecognitionOutcome =
+  | (RecognitionBase & {
+      status: "accepted"
+      candidate: CandidateEvidence
+      alternatives?: CandidateEvidence[]
+      reason?: never
+    })
+  | (RecognitionBase & {
+      status: "ambiguous"
+      candidate: CandidateEvidence
+      alternatives: [CandidateEvidence, ...CandidateEvidence[]]
+      classMargin: number
+      reason?: never
+    })
+  | (RecognitionBase & {
+      status: "not-recognized"
+      reason: NotRecognizedReason
+      candidate?: CandidateEvidence
+      alternatives?: CandidateEvidence[]
+    })
+  | (RecognitionBase & {
+      status: "interrupted"
+      candidate?: never
+      alternatives?: never
+      reason?: never
+    })
+
+type RecognitionSessionState =
+  | {
+      availability: "unavailable"
+      libraryReadiness?: never
+      lastOutcome?: never
+    }
+  | {
+      availability: "ready"
+      libraryReadiness: "no-usable-templates"
+      lastOutcome?: never
+    }
+  | {
+      availability: "ready"
+      libraryReadiness: "partial" | "ready"
+      lastOutcome?: RecognitionOutcome
+    }
 ```
 
 **Contract requirements:**
 
 - A raw DTW-derived percentage shall use a `similarity`/`decision score` name, not “probability.”
 - `accepted` requires the full approved policy: segment quality, eligible class, absolute threshold, and class margin/aggregation where adopted.
-- `not-accepted` requires a versioned reason such as `below-threshold`, `ambiguous`, or `unknown`; only `accepted` appends to the authoritative transcript.
+- `ambiguous` is a terminal segment outcome when approved class candidates are too close; it must carry at least one distinct competing class and a recorded class margin, and it never appends to the authoritative transcript.
+- `not-recognized` requires a versioned reason such as `below-threshold`, `unknown`, or `policy-error`; it never appends to the transcript.
 - `interrupted` is used for invalid/dropout/background/segmentation-quality failures that prevent classification.
-- Recognition-engine errors/timeouts produce a typed non-accepted outcome and never crash the camera loop.
+- Library readiness is derived from per-class readiness: `no-usable-templates` means no eligible class, `partial` means some but not all required classes are eligible, and `ready` means all required classes meet the approved policy. Session availability is separate: `unavailable` means storage/recognizer cannot be read or used. Neither state is a segment outcome.
+- `lastOutcome` is cleared when session availability becomes `unavailable` or library readiness becomes `no-usable-templates`; a prior outcome must not be presented as current.
+- Recognition-engine errors/timeouts produce a typed `not-recognized` or `interrupted` outcome and never crash the camera loop.
 
 ### 8.6 Transcript entry
 
@@ -412,7 +463,7 @@ type ManualTranscriptEntry = {
 type TranscriptEntry = RecognizedTranscriptEntry | ManualTranscriptEntry
 ```
 
-The transcript contains only accepted recognized entries and explicitly manual entries; not-accepted/ambiguous/interrupted segment outcomes are not persisted as transcript words. Speech consumes the current transcript/phrase result and is not the owner of transcript state.
+The transcript contains only accepted recognized entries and explicitly manual entries; not-recognized/ambiguous/interrupted segment outcomes are not persisted as transcript words. Speech consumes the current transcript/phrase result and is not the owner of transcript state.
 
 ### 8.7 Export package
 

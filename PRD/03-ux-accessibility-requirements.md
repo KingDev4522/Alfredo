@@ -230,7 +230,7 @@ Evidence: `src/App.jsx:18-24`, `src/components/Navbar.jsx:53-84`.
 
 **Acceptance criteria:**
 
-- The sign/label, expected hand count, recorder and condition metadata, and capture start context associated with a pending recording are visibly immutable during review; edits apply to the next recording.
+- The sign/label, expected hand count from the Start-time vocabulary snapshot, recorder and condition metadata, and capture start/end context associated with a pending recording are visibly immutable during review; edits apply to the next recording.
 - Start is disabled unless camera/model readiness and minimum capture conditions pass.
 - Cancel returns to ready and releases capture resources.
 - A watchdog ends a capture if frames stop arriving.

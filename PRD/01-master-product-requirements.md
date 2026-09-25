@@ -39,7 +39,7 @@ Enable a person to:
 
 1. Understand the product's bounded scope and data behavior.
 2. Explicitly enable the camera.
-3. Use an approved starter vocabulary or create a personal vocabulary through guided recording.
+3. Use an approved starter vocabulary, import an approved versioned library, or create a personal vocabulary through guided recording.
 4. See recognized words and uncertainty in text.
 5. Speak, replay, edit, or clear the current phrase without losing it on failure.
 6. Review and delete their locally stored landmark recordings.
@@ -190,7 +190,7 @@ See `06-current-state-codebase-audit.md` for evidence.
 
 | Decision | Option A | Option B | Current recommendation |
 |---|---|---|---|
-| Clean-install recognition | Bundle an approved, licensed starter template dataset | Position first release as personal calibration only | Permit both only if an approved dataset and consent/provenance are available; otherwise clearly launch calibration-first |
+| Clean-install recognition | Bundle an approved, licensed starter template dataset | Import an approved versioned library, or position first release as personal calibration only | Permit only an explicitly selected approved strategy; if no approved starter/import strategy is ready, launch calibration-first with clear limitations |
 | Network model | Host model remotely | Bundle/cache model in the application | Bundle or provide an approved first-party asset strategy for reliable setup; do not imply offline unless verified |
 | 3D visuals | Retain Spline as optional progressive enhancement | Remove/replace with lightweight first-party visual | Retain only with static fallback, performance budget, and no core dependency |
 | Speech | Browser Speech Synthesis | Text-only / user-provided audio later | Keep optional browser speech with feature/error handling; do not depend on it |
@@ -225,7 +225,7 @@ See `06-current-state-codebase-audit.md` for evidence.
 1. User opens Interpret and activates the camera.
 2. System verifies an approved usable template library.
 3. User signs continuously.
-4. System presents observing/capturing/classifying states and one terminal outcome: accepted, ambiguous, not recognized, or interrupted. “Not recognized” includes an explicit reason such as below-threshold or unknown gesture.
+4. System presents observing/capturing/classifying states and one segment outcome: accepted, ambiguous, not recognized, or interrupted. Library readiness (including no usable templates) is a separate setup state; “not recognized” includes an explicit reason such as below-threshold or unknown gesture.
 5. Accepted words append to a visible transcript.
 6. User speaks manually or via approved completion gesture/timer.
 7. Text remains available; user can replay, edit, or clear.
@@ -269,10 +269,10 @@ See `06-current-state-codebase-audit.md` for evidence.
 |---|---|
 | PRD-P0-001 | The application shall describe itself as a bounded-vocabulary interpretation aid and disclose material limitations before camera activation. |
 | PRD-P0-002 | Camera/model initialization shall require explicit user intent and shall have one shared, observable lifecycle across Interpret, Record, and diagnostics. |
-| PRD-P0-003 | A recording shall be saved under the immutable vocabulary identity, display label, expected hand count, recorder/condition metadata, and capture start/end context snapshotted when recording began. |
+| PRD-P0-003 | A recording shall save the immutable vocabulary identity, display label, expected hand count, and recorder/condition metadata snapshotted at Start; capture start time shall be bound when capture begins and capture end time shall be bound when capture finishes, then both shall remain frozen. |
 | PRD-P0-004 | Recording and import shall enforce versioned structural, hand-count, landmark, sequence, quality, size, and vocabulary validation. |
 | PRD-P0-005 | The visible transcript shall be authoritative and shall not be erased because speech is unsupported, queued, canceled, or fails. |
-| PRD-P0-006 | Accepted, ambiguous, not-recognized, and interrupted outcomes shall be distinct. Not-recognized results shall retain a reason such as below-threshold or unknown gesture; any displayed score shall not be described as a calibrated probability unless proven. |
+| PRD-P0-006 | Accepted, ambiguous, not-recognized, and interrupted segment outcomes shall be distinct. Library readiness/no-usable-templates is separate. Not-recognized results shall retain a reason such as below-threshold or unknown gesture; any displayed score shall not be described as a calibrated probability unless proven. |
 | PRD-P0-007 | The first-party application shall not transmit camera frames, landmark recordings, custom labels, or recorder metadata. External resource requests and platform speech behavior shall be disclosed accurately. |
 | PRD-P0-008 | Core workflows shall meet the approved accessibility target, including keyboard operation, labels, live status, reduced motion, reflow, contrast, focus, and non-canvas text equivalents. |
 | PRD-P0-009 | Every release shall pass reproducible unit, integration, browser, storage, accessibility, security/dependency, and performance gates on the approved device/browser matrix. |
@@ -284,15 +284,24 @@ See `06-current-state-codebase-audit.md` for evidence.
 
 | ID | Requirement |
 |---|---|
-| PRD-P1-001 | Review shall support quality/provenance filters and prioritized identification of high-risk recordings beyond exact sign search. |
 | PRD-P1-002 | Review shall show recorder, timestamp, condition, hand count, duration/frame count, quality state, and provenance where available. |
 | PRD-P1-003 | The application shall provide actionable model, camera, storage, speech, import, quota, and unknown-error recovery. |
 | PRD-P1-004 | The application shall provide 404/error handling, route titles/headings, focus management, and a responsive navigation model. |
-| PRD-P1-005 | Calibration UX shall recommend the next valid action and explain the evidence or blocker for each sign's readiness. |
 | PRD-P1-006 | The product shall be deployable with HTTPS, direct-route fallback, correct WASM MIME behavior, and a documented root/subpath strategy. |
 | PRD-P1-007 | The product shall reconcile README, page title, terminology, thresholds, timing, privacy wording, and visual documentation with the approved implementation. |
 | PRD-P1-008 | Privacy-safe diagnostics and support procedures shall exist without recording raw gesture content by default. |
 | PRD-P1-009 | The approved recognition policy shall use class-level aggregation, quality/outlier handling, and a class margin where needed so one poor template cannot solely determine accepted output. |
+| PRD-P1-010 | Review shall support quality/provenance filters and prioritized identification of high-risk recordings beyond exact sign search. |
+| PRD-P1-011 | Calibration UX shall recommend the next valid action and explain the evidence or blocker for each sign's readiness. |
+
+### Retired master requirement IDs
+
+| Retired ID | Superseded by | Reason |
+|---|---|---|
+| PRD-P1-001 | PRD-P0-011 | Complete portable import/export is a P0 data-integrity requirement, not a P1 enhancement. |
+| PRD-P1-005 | PRD-P0-012 | Usable-template readiness and raw-count distinction are P0 release requirements. |
+
+Retired IDs are retained for history and must not be reused.
 
 ### P2 — Candidate after beta
 

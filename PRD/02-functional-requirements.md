@@ -131,11 +131,11 @@ Requirement IDs are stable and should not be reused after retirement.
 
 **Acceptance criteria:**
 
-- **AC-REC-001-01:** Given ready state, when Start is activated, then the immutable vocabulary identity/label, expected hand count, recorder and condition metadata, and capture start context are snapshotted on the pending recording before capture.
+- **AC-REC-001-01:** Given ready state, when Start is activated, then the immutable vocabulary identity/label, expected hand count, recorder and condition metadata are snapshotted on the pending recording; `captureStartedAt` shall be bound when capture begins.
 - **AC-REC-001-02:** Given countdown or capture, when Cancel is activated, then timers/frame collection stop and the flow returns to a clean ready state.
 - **AC-REC-001-03:** Given frame callbacks stop during capture, when the watchdog threshold expires, then capture finalizes/cancels into a recoverable state rather than remaining “Recording…” indefinitely.
 - **AC-REC-001-04:** Given the model fails while camera is ready, when Start is available, then the invalid state is not possible.
-- **AC-REC-001-05:** Given a pending recording, when the user changes sign, expected hand count, recorder label, or condition label during countdown/capture/review, then the pending snapshot and eventual saved record remain unchanged and are applied only to the next recording.
+- **AC-REC-001-05:** Given a pending recording, when the user changes the selected sign, recorder label, or condition label during countdown/capture/review, then the Start-time snapshot remains unchanged; expected hand count changes only through an approved vocabulary/version change. When capture finishes, `captureEndedAt` shall be bound and frozen before review, and edits apply only to the next recording.
 
 ### FR-REC-002 — Capture timing contract (P0)
 
@@ -170,12 +170,12 @@ Requirement IDs are stable and should not be reused after retirement.
 
 ### FR-REC-005 — Immutable review association (P0)
 
-**Target:** While a recording is pending, the vocabulary identity/display label, expected hand count, recorder/condition metadata, and capture start/end context shall be immutable. Changes shall apply only to the next recording.
+**Target:** While a recording is pending, the vocabulary identity/display label, expected hand count from the Start-time vocabulary snapshot, and recorder/condition metadata shall be immutable. `captureStartedAt` is bound when capture begins and `captureEndedAt` when capture finishes; both are then frozen. Changes shall apply only to the next recording.
 
 **Acceptance criteria:**
 
-- **AC-REC-005-01:** Given a pending recording, when the user attempts to change its sign or metadata, then the pending review snapshot does not change.
-- **AC-REC-005-02:** Given Keep, when persistence completes, then the saved record contains the identity and metadata captured at recording start and the review displays those same values.
+- **AC-REC-005-01:** Given a pending recording, when the user attempts to change its sign or metadata, then the pending review snapshot does not change; expected hand count is not edited independently of the snapshotted vocabulary.
+- **AC-REC-005-02:** Given capture finishes and Keep is activated, when persistence completes, then the saved record contains the Start-time identity/metadata plus the actual capture start/end timestamps and the review displays those same values.
 - **AC-REC-005-03:** Given rapid Keep activation, when save is pending, then one transaction/record is created only.
 
 ### FR-REC-006 — Replay and save (P0)
@@ -296,13 +296,13 @@ Requirement IDs are stable and should not be reused after retirement.
 
 ### FR-LIV-005 — Non-probabilistic uncertainty (P0)
 
-**Target:** The system shall return one typed terminal outcome: no templates, interrupted, accepted, or not accepted. A not-accepted outcome shall retain an approved reason such as below-threshold, ambiguous class margin, or unknown/out-of-distribution gesture. Any displayed score shall be labeled as a similarity/decision score unless calibration proves it is a probability.
+**Target:** The system shall expose a separate library-readiness state, including no usable templates, and return one typed segment outcome: accepted, ambiguous, not recognized, or interrupted. A not-recognized outcome shall retain an approved reason such as below-threshold, unknown/out-of-distribution gesture, or policy-error; ambiguity is its own outcome. Any displayed score shall be labeled as a similarity/decision score unless calibration proves it is a probability.
 
 **Acceptance criteria:**
 
 - **AC-LIV-005-01:** Given one winning template and no approved margin/quality rule, when the policy accepts it, then the UI does not call the score “confidence probability.”
-- **AC-LIV-005-02:** Given the top **classes** are too close under the approved policy, when classification completes, then the terminal result is not accepted with reason `ambiguous` and no word is appended.
-- **AC-LIV-005-03:** Given an out-of-distribution/unknown gesture, when the approved policy detects or cannot accept it, then the terminal result is not accepted with reason `unknown` and the UI offers retry/clear feedback.
+- **AC-LIV-005-02:** Given the top **classes** are too close under the approved policy, when classification completes, then the segment outcome is `ambiguous` and no word is appended.
+- **AC-LIV-005-03:** Given an out-of-distribution/unknown gesture, when the approved policy detects or cannot accept it, then the segment outcome is `not-recognized` with reason `unknown` and the UI offers retry/clear feedback.
 
 ### FR-LIV-006 — Class-level aggregation and outlier handling (P1)
 
@@ -322,7 +322,7 @@ Requirement IDs are stable and should not be reused after retirement.
 
 - **AC-LIV-007-01:** Given a hand-count mismatch, when a segment is captured, then the policy records the majority/observed counts and applies the approved primary/secondary search behavior.
 - **AC-LIV-007-02:** Given cross-hand-count search is enabled, when evaluated, then performance and false-accept impact are included in release evidence.
-- **AC-LIV-007-03:** Given a hand-count tie/malformed sequence, when classification runs, then the result is deterministically `interrupted` or otherwise not accepted and the behavior is tested.
+- **AC-LIV-007-03:** Given a hand-count tie/malformed sequence, when classification runs, then the result is deterministically `interrupted` and the behavior is tested.
 
 ### FR-LIV-008 — Duplicate/repeat behavior (P1)
 
@@ -461,7 +461,7 @@ Detailed engineering design is in `04-technical-data-privacy-security.md`. Funct
 
 - Stable record ID and schema version.
 - Vocabulary identity and immutable display-label snapshot.
-- Recorded timestamp and optional signer/batch/condition metadata.
+- Capture-start timestamp, capture-end timestamp, and persistence timestamp (with their distinct meanings).
 - Expected and observed hand-count summary.
 - Frame timestamps and validated landmark sequence.
 - Normalization/provenance/policy metadata.
@@ -470,8 +470,9 @@ Detailed engineering design is in `04-technical-data-privacy-security.md`. Funct
 
 ### 11.3 Recognition outcome
 
-- Terminal outcome: no templates, interrupted, accepted, or not accepted.
-- For not accepted, an approved reason: below-threshold, ambiguous, unknown/out-of-distribution, or another versioned reason.
+- Separate library-readiness state, including no usable templates.
+- Segment outcome: accepted, ambiguous, not recognized, or interrupted.
+- For not recognized, an approved reason: below-threshold, unknown/out-of-distribution, policy-error, or another versioned reason; ambiguous is its own outcome rather than a hidden reason.
 - Candidate identity/label and clearly named score type when a candidate exists.
 - Alternative/class margin when used.
 - Segment quality and hand-count summary.

@@ -24,7 +24,7 @@ The repository is a coherent, browser-only prototype for a fixed-vocabulary Indi
 
 It is **not ready for a general public release**. The most important blockers are:
 
-1. A clean installation contains no recognition templates, so the interpreter is unusable until the current browser user records the vocabulary.
+1. A clean installation contains no bundled/approved recognition templates. The current product can only attempt calibration by recording or unsafe import, so it has no supported clean-install interpretation strategy.
 2. Live segmentation is unvalidated, and the checked-in 97.535% result is not a reproducible held-out evaluation of the live path.
 3. Core camera/model lifecycle and error handling can leak resources, hide failures, or trap recording in a non-terminating state.
 4. Recording and import validation can corrupt the template library; a recording can be saved under a sign changed after capture.
@@ -187,7 +187,7 @@ Evidence: `src/components/ReviewFlagged.jsx:22-128`, `RecordingTool.jsx:499-592`
 
 ## 8. Runtime validation evidence
 
-Validation was run locally on 2026-09-25. The generated `dist/` directory was removed after measurement.
+Validation was run locally on 2026-09-25 in Windows. The evaluator error reported Node.js v24.14.1; the npm version was not recorded. The generated `dist/` directory was removed after measurement.
 
 | Check | Result | Interpretation |
 |---|---|---|
@@ -245,7 +245,7 @@ The evaluator is also not portable: its input defaults to a hard-coded external 
 | ID | Severity | Finding | User / release impact | Required disposition |
 |---|---|---|---|---|
 | GAP-001 | P0 | No recognition templates ship with a clean install | New users cannot interpret | Bundle an approved template dataset or explicitly limit the product to personal calibration and provide an onboarding path |
-| GAP-002 | P0 | Pending recording retains only frames/hand counts, while Keep reads the current sign and metadata and generates the save timestamp | A user can save a capture under another label/metadata or with an inaccurate capture time and corrupt recognition data | Snapshot vocabulary ID/label, expected hand count, recorder/condition metadata, and capture start/end context before capture; apply edits only to the next recording |
+| GAP-002 | P0 | Pending recording retains only frames/hand counts, while Keep reads the current sign and metadata and generates the save timestamp | A user can save a capture under another label/metadata or with an inaccurate capture time and corrupt recognition data | Snapshot vocabulary ID/label, expected hand count, and recorder/condition metadata at Start; bind capture start/end timestamps when capture begins/finishes; apply edits only to the next recording |
 | GAP-003 | P0 | Camera/model async cleanup can leak streams or model instances | Privacy indicator/resource leak; StrictMode doubles the development exposure | Add cancellation after every await and explicit stream/model disposal |
 | GAP-004 | P0 | Core flows hide model/camera failures; recording can enter “Recording…” forever | Users receive false idle status or cannot recover | Unify readiness/error state and add retry/cancel/watchdog behavior |
 | GAP-005 | P0 | Import and recording validity checks are insufficient | Corrupt/unusable templates or runtime errors | Validate schema deeply, reject/quarantine invalid data, and add transactional rollback |

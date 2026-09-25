@@ -162,7 +162,7 @@ Use browser automation plus controlled camera fixtures/mocks where possible:
 2. Explicit activation, grant, model ready, Stop, route change, no active tracks.
 3. Permission denied/revoked/device busy/no camera and recovery.
 4. Record valid sample, review, save, count/readiness update.
-5. Attempt sign change during pending review; original identity remains.
+5. Attempt sign/recorder/condition changes during pending review; original Start-time identity/metadata remains, and capture start/end timestamps are bound and frozen at the correct lifecycle points.
 6. Invalid/interrupted capture cannot save.
 7. Import valid/invalid/duplicate/oversized packages atomically.
 8. Export, clean-profile import, labels and data round-trip.
@@ -251,7 +251,7 @@ Report accepted false-positive rate and coverage tradeoffs. Do not tune and repo
 
 #### EV-05 — Personal calibration scenario
 
-If the product launches calibration-first:
+If the product launches calibration-first or import-only:
 
 - Measure time and errors to create a usable personal library.
 - Measure same-signer personalization versus cross-signer data.
@@ -294,7 +294,7 @@ Thresholds shall include a rationale, dataset, method, and regression tolerance.
 | Hand tracking | Detection FPS, dropped/late frames, CPU/GPU/memory, adaptive scale |
 | Segmenter | Time per frame, segment-finalization latency |
 | Classifier | Per-template and total class-search latency by template count/device |
-| Worker queue | Queue age, dropped stale segments, main-thread long tasks |
+| Recognition queue (Worker if selected) | Queue age, dropped stale segments, main-thread long tasks |
 | Recording | CPU/memory, save transaction time, replay smoothness |
 | Review | Load/search/delete latency with 10/100/500-result fixtures |
 | Import | Parse/validate/commit time by package size/validity |
@@ -390,8 +390,8 @@ Status legend: **Pass** = evidence meets the condition; **Fail** = a known condi
 | Gate | Pass condition | Current status | Failure action |
 |---|---|---|---|
 | GATE-001 Scope/traceability | Approved scope/non-goals; every P0/P1 requirement has owner, test, and gate | **Blocked** | Resolve unowned/untraceable scope |
-| GATE-002 Clean-install journey | Supported user can activate, understand prerequisites, and reach a truthful usable/calibration state | **Fail** — no templates/setup path | No release or remove unsupported turnkey claim |
-| GATE-003 Production build | `npm run build` passes on the documented build environment | **Pass** — local evidence only | Re-run on release environment |
+| GATE-002 Clean-install journey | Supported user can activate, understand prerequisites, and reach a truthful usable/calibration state through an approved strategy | **Fail** — no approved starter/import/calibration strategy; current record/import paths have P0 defects | No release or remove unsupported turnkey claim |
+| GATE-003 Local build smoke | `npm run build` succeeds on the recorded local validation environment | **Pass** — smoke only; not release reproducibility | Re-run on release environment via GATE-021 |
 | GATE-004 Lint/format/static | First-party lint has 0 errors and approved warning budget; vendor generated files excluded | **Fail** | Fix config and first-party warnings |
 | GATE-005 Automated tests | All required P0/P1 unit/integration/E2E suites pass | **Blocked** | No release |
 | GATE-006 Data integrity/migration | 0 wrong-sign/invalid saves; valid fixture round-trip 100%; atomic recovery passes | **Fail** | Fix and rerun |
