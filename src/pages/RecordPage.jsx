@@ -2,141 +2,90 @@ import { useRef, useState } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { useGSAP } from "@gsap/react";
-import { RecordingTool } from "../components/RecordingTool";
 import { HandTracker } from "../components/HandTracker";
-import { SplineScene } from "../components/SplineScene";
+import { RecordingTool } from "../components/RecordingTool";
 import { scrollToId } from "../utils/scrollTo";
 
 gsap.registerPlugin(ScrollTrigger, useGSAP);
 
-const ORB_SCENE = "https://prod.spline.design/jJJcWeywnUIENZdv/scene.splinecode";
-
 export function RecordPage() {
   const rootRef = useRef(null);
-  const ctaRef = useRef(null);
   const [showCameraTest, setShowCameraTest] = useState(false);
 
   useGSAP(
     () => {
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return undefined;
+
       gsap
         .timeline({ defaults: { ease: "power3.out" } })
-        .from(".record-eyebrow", { autoAlpha: 0, y: -12, duration: 0.5 })
-        .from(".record-orb", { autoAlpha: 0, scale: 0.97, duration: 0.9 }, "-=0.15")
-        .from(".record-cta", { autoAlpha: 0, y: 12, duration: 0.5 }, "-=0.4");
-    },
-    { scope: rootRef }
-  );
-
-  // CTA hover — teal glow, matching the orb scene's own palette
-  useGSAP(
-    () => {
-      const btn = ctaRef.current;
-      if (!btn) return;
-      const enter = () =>
-        gsap.to(btn, {
-          scale: 1.035,
-          borderColor: "rgba(45,226,230,0.55)",
-          boxShadow: "0 0 34px -6px rgba(45,226,230,0.55)",
-          duration: 0.35,
-          ease: "power2.out",
+        .from(".cyber-record-copy", { autoAlpha: 0, y: 22, duration: 0.7 })
+        .from(".record-tool-reveal", {
+          autoAlpha: 0,
+          y: 28,
+          duration: 0.7,
+          scrollTrigger: { trigger: "#recording-tool", start: "top 84%" },
         });
-      const leave = () =>
-        gsap.to(btn, {
-          scale: 1,
-          borderColor: "rgba(255,255,255,0.18)",
-          boxShadow: "0 0 0px 0px rgba(45,226,230,0)",
-          duration: 0.35,
-          ease: "power2.out",
-        });
-      btn.addEventListener("mouseenter", enter);
-      btn.addEventListener("mouseleave", leave);
-      return () => {
-        btn.removeEventListener("mouseenter", enter);
-        btn.removeEventListener("mouseleave", leave);
-      };
-    },
-    { scope: rootRef }
-  );
 
-  // Reveal the recording tool as it scrolls into view
-  useGSAP(
-    () => {
-      gsap.from(".record-tool-reveal", {
-        autoAlpha: 0,
-        y: 30,
-        duration: 0.7,
-        ease: "power2.out",
-        scrollTrigger: {
-          trigger: "#recording-tool",
-          start: "top 82%",
-        },
-      });
+      return undefined;
     },
-    { scope: rootRef }
+    { scope: rootRef },
   );
 
   return (
-    <div ref={rootRef} className="w-full" style={{ backgroundColor: "#050505" }}>
-      <span
-        className="record-eyebrow block text-center text-xs uppercase tracking-[0.35em] pt-8"
-        style={{ color: "#2DE2E6", fontFamily: "'JetBrains Mono', monospace", textShadow: "0 0 16px rgba(45,226,230,0.45)" }}
-      >
-        Record Signs
-      </span>
-
-      {/* Orb — full-width banner, its own baked-in heading/copy carry the message.
-          The CTA floats where the scene's own button sits, ready to take over once
-          that button is removed from the Spline scene. */}
-      <div className="record-orb relative w-full" style={{ height: "78vh", minHeight: 520 }}>
-        <SplineScene
-          scene={ORB_SCENE}
-          className="w-full h-full"
-          style={{ width: "100%", height: "100%" }}
-        />
-
-        <div
-          className="absolute z-20"
-          style={{ left: "19%", bottom: "6%" }}
-        >
+    <div ref={rootRef} className="cyber-page cyber-page--record">
+      <section className="cyber-record-hero cyber-shell">
+        <div className="cyber-record-copy">
+          <h1>Build the vocabulary, one rep at a time.</h1>
+          <p>
+            Select a sign, capture clean repetitions, review the skeleton, and keep only useful
+            movement. Fifteen reps per sign is the target, not a hard limit.
+          </p>
+          <div className="cyber-page__signal" aria-label="Recording targets">
+            <div>
+              <span>Target reps</span>
+              <strong>15</strong>
+            </div>
+            <div>
+              <span>Fixed signs</span>
+              <strong>25</strong>
+            </div>
+          </div>
           <button
-            ref={ctaRef}
+            type="button"
             onClick={() => scrollToId("recording-tool")}
-            className="record-cta backdrop-blur-md inline-flex items-center gap-3 px-7 py-3.5 rounded-full border text-sm sm:text-base font-semibold tracking-wide"
-            style={{
-              borderColor: "rgba(255,255,255,0.18)",
-              backgroundColor: "rgba(45,226,230,0.08)",
-              color: "#F5F6F8",
-              fontFamily: "'Space Grotesk', sans-serif",
-            }}
+            className="cyber-button cyber-button--primary"
           >
-            Start Recording
-            <span aria-hidden="true">→</span>
+            Start recording
+            <span aria-hidden="true">↓</span>
           </button>
         </div>
-      </div>
+      </section>
 
-      {/* Actual recording tool — untouched logic */}
-      <section id="recording-tool" className="record-tool-reveal w-full px-4 sm:px-8 pt-16 pb-16 scroll-mt-16">
+      <section id="recording-tool" className="record-tool-reveal cyber-workflow scroll-mt-20">
         <RecordingTool />
       </section>
 
-      {/* Camera calibration test — kept tucked away, same as before */}
-      <section className="w-full flex flex-col items-center gap-4 pb-20 px-4">
-        <button
-          onClick={() => setShowCameraTest((v) => !v)}
-          className="text-xs text-slate-600 hover:text-slate-400 transition-colors flex items-center gap-1"
-        >
-          {showCameraTest ? "▾" : "▸"} Camera test
-        </button>
-        {showCameraTest && (
-          <div className="w-full flex flex-col items-center gap-3">
-            <HandTracker />
-            <p className="text-xs text-center max-w-md text-slate-600">
-              Hold one or both hands up in front of the camera. You should
-              see the skeleton track smoothly, with no lag.
-            </p>
-          </div>
-        )}
+      <section className="cyber-workflow !pt-0" aria-label="Camera test">
+        <div className="flex flex-col items-center gap-4">
+          <button
+            type="button"
+            onClick={() => setShowCameraTest((visible) => !visible)}
+            className="cyber-button"
+            aria-expanded={showCameraTest}
+          >
+            {showCameraTest ? "Close camera test" : "Open camera test"}
+            <span aria-hidden="true">{showCameraTest ? "↑" : "→"}</span>
+          </button>
+          {showCameraTest && (
+            <div className="cyber-panel grid w-full gap-4 p-4">
+              <HandTracker />
+              <p className="m-0 max-w-2xl text-center text-xs text-[rgba(242,240,232,0.68)]">
+                Hold one or both hands in frame. Confirm that the skeleton tracks smoothly before
+                recording production data.
+              </p>
+            </div>
+          )}
+        </div>
       </section>
     </div>
   );

@@ -10,39 +10,48 @@ export function DeletePage() {
 
   useGSAP(
     () => {
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return undefined;
+
       gsap
         .timeline({ defaults: { ease: "power3.out" } })
-        .from(".delete-eyebrow", { autoAlpha: 0, y: -12, duration: 0.5 })
-        .from(".delete-title", { autoAlpha: 0, y: 16, duration: 0.6 }, "-=0.25")
-        .from(".delete-tagline", { autoAlpha: 0, y: 10, duration: 0.5 }, "-=0.35")
-        .from(".delete-panel", { autoAlpha: 0, y: 20, duration: 0.6 }, "-=0.25");
+        .from(".cyber-page__headline", { autoAlpha: 0, y: 24, duration: 0.75 })
+        .from(".cyber-page__aside", { autoAlpha: 0, y: 18, duration: 0.65 }, "-=0.38")
+        .from(".cyber-workflow", { autoAlpha: 0, y: 28, duration: 0.7 }, "-=0.32");
+
+      return undefined;
     },
-    { scope: rootRef }
+    { scope: rootRef },
   );
 
   return (
-    <div ref={rootRef} className="w-full min-h-[80vh] flex flex-col items-center px-4 sm:px-8 pt-16 pb-24">
-      <span
-        className="delete-eyebrow text-xs uppercase tracking-[0.3em] mb-4"
-        style={{ color: "#FFB627", fontFamily: "'JetBrains Mono', monospace" }}
-      >
-        Delete Recordings
-      </span>
-      <h1
-        className="delete-title text-3xl sm:text-4xl font-bold text-center"
-        style={{ fontFamily: "'Space Grotesk', sans-serif", color: "#F2F4F8" }}
-      >
-        Surgical cleanup, not a wipe
-      </h1>
-      <p className="delete-tagline mt-3 max-w-lg text-sm text-center" style={{ color: "#9AA1B4" }}>
-        Type a sign's name to pull up every recording for it, replay each
-        one's actual motion, and remove only the ones genuinely hurting
-        accuracy — every other recording for that sign stays put.
-      </p>
+    <div ref={rootRef} className="cyber-page cyber-page--delete">
+      <header className="cyber-page__header cyber-shell">
+        <div className="cyber-page__headline">
+          <h1 className="cyber-page__title">
+            Surgical cleanup, <strong>not a wipe.</strong>
+          </h1>
+        </div>
+        <div className="cyber-page__aside">
+          <p className="cyber-page__lede">
+            Search for a sign, replay every matching take as a skeleton, and remove only recordings
+            that are damaging recognition quality. Other takes remain untouched.
+          </p>
+          <div className="cyber-page__signal" aria-label="Review controls">
+            <div>
+              <span>Delete scope</span>
+              <strong>One take</strong>
+            </div>
+            <div>
+              <span>Review mode</span>
+              <strong>Skeleton</strong>
+            </div>
+          </div>
+        </div>
+      </header>
 
-      <div className="delete-panel w-full mt-12">
+      <section className="cyber-workflow">
         <ReviewFlagged />
-      </div>
+      </section>
     </div>
   );
 }

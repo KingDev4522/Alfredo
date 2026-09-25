@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+websockets
+torch
+transformers
+faster-whisper
+PyMuPDF
+python-docx
+yt-dlp
+onnx
+python-multipart

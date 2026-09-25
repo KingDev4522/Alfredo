@@ -39,14 +39,14 @@ export const VOCABULARY = [
   { id: "three", label: "3", category: "Numbers", twoHanded: false },
   { id: "four", label: "4", category: "Numbers", twoHanded: false },
   // "five" was deliberately dropped from the vocabulary during Phase 3
-  // accuracy testing and is no longer recorded or supported — the
+  // accuracy testing and is no longer recorded or supported - the
   // vocabulary is 25 solid signs rather than 26 with one shaky entry.
 
   // State
   { id: "good_bad", label: "Good / Bad", category: "State", twoHanded: false },
 ];
 
-// This is a target to aim for, not a hard limit — you can record more
+// This is a target to aim for, not a hard limit - you can record more
 // than this per sign if you want, and doing so with deliberate variation
 // (different angle, distance, lighting) genuinely helps recognition
 // generalize better, especially when one person is recording everything

@@ -1,3 +1,44 @@
-node_modules
-dist
+# ---- FRONTEND ----
+node_modules/
+dist/
+build/
+.env
+.env.local
+
+# ---- BACKEND ----
+isl-backend/venv/
+__pycache__/
+.pytest_cache/
+isl-backend/weights/
+isl-backend/*.mp4
+isl-backend/*.pdf
+isl-backend/*.webm
+
+# ---- OS FILES ----
 .DS_Store
+Thumbs.db
+
+# ---- RUNTIME LOGS (never commit; the live backend holds these open,
+# which breaks future pulls/rebases when they are tracked) ----
+*.log
+*.log.*
+isl-backend/*.log
+isl-backend/logs/
+logs/
+
+# ---- BACKUP / TEMP ARTIFACTS ----
+*.bak
+*.tmp
+isl-backend/database/*.backup-*.json
+isl-backend/*.backup-*.json
+
+# ---- LARGE / ML FILES ----
+*.onnx
+*.onnx.data
+*.whl
+*.ckpt
+*.pt
+*.pth
+
+.env.local
+supabase/.temp/

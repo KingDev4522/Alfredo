@@ -1,0 +1,299 @@
+/* Landing styles - ported from signspeak-landing/src/index.css (Tailwind v4 → v3).
+ * Theme tokens live in tailwind.config.js. Everything here is either scoped
+ * under .landing-root or inert unless a landing class is present, so app
+ * routes are unaffected. Imported only by src/pages/LandingPage.jsx. */
+
+.landing-root {
+  background: #070709;
+  color: #f5f5f4;
+  font-family: "Space Grotesk", "Inter Tight", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+.landing-root ::selection {
+  background: rgba(245, 158, 11, 0.28);
+  color: #fff;
+}
+
+/* Scrollbar hidden only while the landing page is mounted (class toggled
+ * on <html> by LandingPage). */
+.landing-scroll,
+.landing-scroll body {
+  scrollbar-width: none;
+}
+.landing-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Lenis */
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+.lenis.lenis-stopped {
+  overflow: hidden;
+}
+
+/* Grain overlay - fixed, pointer-events-none, GPU cheap */
+.grain {
+  position: fixed;
+  inset: -100%;
+  z-index: 90;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.04;
+  animation: grain-shift 9s steps(10) infinite;
+  will-change: transform;
+}
+
+@keyframes grain-shift {
+  0%, 100% { transform: translate(0, 0); }
+  10% { transform: translate(-4%, -6%); }
+  30% { transform: translate(4%, 3%); }
+  50% { transform: translate(-3%, 5%); }
+  70% { transform: translate(5%, -4%); }
+  90% { transform: translate(-5%, 2%); }
+}
+
+/* Split text chars */
+.char {
+  display: inline-block;
+  will-change: transform, opacity;
+}
+
+/* Metric count */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Floating glass nav bar */
+.glass-nav {
+  background: linear-gradient(180deg, rgba(20, 20, 24, 0.55), rgba(10, 10, 13, 0.42));
+  -webkit-backdrop-filter: blur(26px) saturate(1.6);
+  backdrop-filter: blur(26px) saturate(1.6);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 12px 40px -16px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.glass-nav--scrolled {
+  background: linear-gradient(180deg, rgba(16, 16, 20, 0.78), rgba(8, 8, 11, 0.62));
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Mobile menu drop */
+.nav-drop {
+  animation: nav-drop 0.38s cubic-bezier(0.32, 0.72, 0, 1) both;
+  transform-origin: top center;
+}
+@keyframes nav-drop {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+/* Glass pill (legacy) */
+.glass-pill {
+  background: rgba(10, 10, 12, 0.42);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.glass-card {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012));
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* CTA radial beam border */
+.cta-beam {
+  position: relative;
+  isolation: isolate;
+}
+.cta-beam::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 9999px;
+  padding: 1px;
+  background: conic-gradient(from var(--beam-angle, 0deg), transparent 0deg, rgba(255, 183, 3, 0.9) 40deg, rgba(245, 158, 11, 0.25) 80deg, transparent 120deg 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: beam-spin 3.2s linear infinite;
+  z-index: -1;
+}
+
+@property --beam-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes beam-spin {
+  to { --beam-angle: 360deg; }
+}
+
+/* Magnetic hover ring */
+.hover-ring {
+  position: relative;
+}
+.hover-ring::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: inherit;
+  border: 1px solid rgba(255, 183, 3, 0);
+  transition: border-color 0.4s cubic-bezier(0.32, 0.72, 0, 1), box-shadow 0.4s cubic-bezier(0.32, 0.72, 0, 1);
+  pointer-events: none;
+}
+.hover-ring:hover::after {
+  border-color: rgba(255, 183, 3, 0.45);
+  box-shadow: 0 0 24px rgba(245, 158, 11, 0.18), inset 0 0 12px rgba(245, 158, 11, 0.06);
+}
+
+/* Pulse dot */
+.pulse-dot {
+  position: relative;
+}
+.pulse-dot::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 9999px;
+  background: rgba(45, 212, 191, 0.35);
+  animation: pulse-ring 2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+@keyframes pulse-ring {
+  0% { transform: scale(0.6); opacity: 1; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+/* Pipeline connector flow */
+.flow-line {
+  background: linear-gradient(90deg, transparent, rgba(245, 158, 11, 0.7), rgba(45, 212, 191, 0.7), transparent);
+  background-size: 200% 100%;
+  animation: flow-run 2.4s linear infinite;
+}
+@keyframes flow-run {
+  to { background-position: -200% 0; }
+}
+
+/* Ripple for buttons */
+.ripple {
+  position: absolute;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(255, 183, 3, 0.35) 0%, transparent 70%);
+  transform: translate(-50%, -50%) scale(0);
+  animation: ripple-out 0.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  pointer-events: none;
+}
+@keyframes ripple-out {
+  to { transform: translate(-50%, -50%) scale(3.2); opacity: 0; }
+}
+
+/* Skeleton replay trace */
+.trace-anim {
+  stroke-dasharray: 6 10;
+  animation: trace-dash 1.4s linear infinite;
+}
+@keyframes trace-dash {
+  to { stroke-dashoffset: -32; }
+}
+
+/* Manifesto - pure-typography kinetic section */
+.manifesto-marquee {
+  display: flex;
+  width: max-content;
+  animation: manifesto-scroll 32s linear infinite;
+  will-change: transform;
+}
+.manifesto-marquee--reverse {
+  animation-direction: reverse;
+}
+@keyframes manifesto-scroll {
+  to { transform: translateX(-50%); }
+}
+
+.manifesto-spin {
+  animation: manifesto-rotate 26s linear infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+@keyframes manifesto-rotate {
+  to { transform: rotate(360deg); }
+}
+
+.text-outline {
+  color: transparent;
+  -webkit-text-stroke: 1.5px rgba(245, 245, 244, 0.55);
+}
+.text-outline-amber {
+  color: transparent;
+  -webkit-text-stroke: 1.5px rgba(255, 183, 3, 0.75);
+}
+
+/* FlowBeats - center the giant panel headlines */
+[data-flow-section] h2 {
+  text-align: center;
+  text-wrap: balance;
+}
+
+/* Footer - giant textured wordmark (dark grunge letters on black) */
+.footer-giant {
+  font-size: clamp(4rem, 18.5vw, 22rem);
+  letter-spacing: -0.02em;
+  line-height: 0.82;
+  transform: translateY(14%);
+  color: transparent;
+  background-image:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.17), rgba(255, 255, 255, 0.02)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-mask-image: linear-gradient(to bottom, black 72%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 72%, transparent 100%);
+}
+
+/* Gateway CTA - mesh-glow background (black crown melting into
+ * crimson, amber and aqua). Slow drift keeps it alive on GPU-cheap
+ * transform only. */
+.cta-mesh {
+  background:
+    radial-gradient(55% 48% at 28% 58%, rgba(197, 0, 60, 0.6), transparent 70%),
+    radial-gradient(38% 36% at 52% 68%, rgba(243, 230, 0, 0.42), transparent 70%),
+    radial-gradient(50% 52% at 82% 66%, rgba(85, 234, 212, 0.5), transparent 72%),
+    radial-gradient(90% 55% at 50% 112%, rgba(85, 234, 212, 0.32), transparent 72%),
+    radial-gradient(45% 40% at 12% 78%, rgba(197, 0, 60, 0.35), transparent 70%),
+    linear-gradient(to bottom, #050507 0%, #0a0a13 42%, #150a1c 78%, #0a1214 100%);
+  animation: cta-mesh-drift 14s ease-in-out infinite alternate;
+  will-change: transform;
+}
+@keyframes cta-mesh-drift {
+  from { transform: scale(1); }
+  to { transform: scale(1.07); }
+}
+
+/* Gateway gradient */
+.gateway-fade {
+  background:
+    radial-gradient(120% 90% at 50% 110%, rgba(45, 212, 191, 0.14), transparent 60%),
+    linear-gradient(to bottom, #070709 0%, #080b0c 55%, #0a1512 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grain, .cta-beam::before, .pulse-dot::before, .flow-line, .trace-anim,
+  .manifesto-marquee, .manifesto-spin, .cta-mesh {
+    animation: none !important;
+  }
+  .char {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}

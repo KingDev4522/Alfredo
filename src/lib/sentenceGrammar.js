@@ -3,24 +3,24 @@
  * spoken phrases, by inserting the connecting words (am, is, need, a...)
  * that ISL itself doesn't sign but English needs.
  *
- * WHY THIS EXISTS: real ISL — like most sign languages — generally
+ * WHY THIS EXISTS: real ISL, like most sign languages, generally
  * doesn't have dedicated signs for prepositions and joining verbs. It
  * relies on context and word order instead. That means a literal
  * word-for-word reading of recognized signs ("I. Pain. Help. Doctor.")
  * is accurate to what was signed, but sounds broken and telegraphic when
  * spoken aloud. Rather than asking the user to learn/teach a custom
  * gesture for every "is," "am," "a," and "in," this module handles that
- * translation in software, using simple, explainable rules — not a full
+ * translation in software, using simple, explainable rules - not a full
  * NLP system, just enough to cover this vocabulary's realistic patterns.
  *
  * This is deliberately a set of small, readable rules rather than a
  * black box, so it's easy to extend if more signs are added later.
  */
 
-// Words that work as "<Subject> am/are <word>" — a state or condition.
+// Words that work as "<Subject> am/are <word>" - a state or condition.
 const STATE_WORDS = new Set(["pain", "hungry"]);
 
-// Words that work as "<Subject> need(s) <word>" — a request.
+// Words that work as "<Subject> need(s) <word>" - a request.
 const NEED_WORDS = new Set(["water", "food", "help", "doctor"]);
 
 // Some need-words read better with "a" in front ("a doctor" not "doctor").
@@ -51,11 +51,11 @@ function spokenWord(signId) {
  * signed) into an array of natural-language phrases, ready to be joined
  * with periods and spoken aloud.
  *
- * This walks the sequence looking for small, specific patterns — a
+ * This walks the sequence looking for small, specific patterns - a
  * subject followed by a state/need word, or a question word paired with
- * "you"/"name" — and only falls back to speaking a word on its own when
+ * "you"/"name" - and only falls back to speaking a word on its own when
  * nothing more specific matches. That fallback is exactly the plain,
- * literal reading we're trying to improve on, so nothing is ever lost —
+ * literal reading we're trying to improve on, so nothing is ever lost - 
  * it's only ever made more natural where a rule applies.
  */
 export function buildSpokenPhrases(signIds, { autoGrammar = true } = {}) {
@@ -70,7 +70,7 @@ export function buildSpokenPhrases(signIds, { autoGrammar = true } = {}) {
       const nextNext = signIds[i + 2];
 
       // "What"/"Name"/"You" in any adjacent order all mean the same
-      // question — real ISL word order commonly puts the question word
+      // question - real ISL word order commonly puts the question word
       // last (topic-comment structure), but signers won't always do this
       // the same way, so we match the words as a set, not a fixed order.
       const windowOf3 = new Set([current, next, nextNext]);
@@ -118,7 +118,7 @@ export function buildSpokenPhrases(signIds, { autoGrammar = true } = {}) {
       }
 
       // A state/need word on its own (no preceding subject) still reads
-      // better with "I" assumed — the most common real use case for this
+      // better with "I" assumed - the most common real use case for this
       // vocabulary is describing your own condition or need.
       if (STATE_WORDS.has(current)) {
         const preposition = current === "pain" ? "in " : "";
@@ -134,7 +134,7 @@ export function buildSpokenPhrases(signIds, { autoGrammar = true } = {}) {
       }
     }
 
-    // Standalone courtesy/exclamation/number words — spoken as-is. Also
+    // Standalone courtesy/exclamation/number words - spoken as-is. Also
     // the path every word takes when autoGrammar is off: no injected
     // subject/verb/article, just the word itself, so the signer's own
     // choice and order of signs is what gets spoken, unaltered.
@@ -151,12 +151,38 @@ export function buildSpokenPhrases(signIds, { autoGrammar = true } = {}) {
  * pause rather than running everything together.
  */
 export function phrasesToSpeechText(phrases) {
-  return phrases
-    .map((p) => (/[.?!]$/.test(p) ? p : `${p}.`))
-    .join(" ");
+  let text = phrases.join(" ").trim();
+  if (!text) return text;
+  
+  // Enforce automated sentence-case capitalization
+  text = capitalize(text);
+
+  // Check if it already has terminal punctuation
+  const terminalRegex = /([.?!]+)$/;
+  const match = text.match(terminalRegex);
+
+  if (match) {
+    // Normalize trailing run of punctuation to a single mark
+    const singleMark = match[1][0];
+    text = text.replace(terminalRegex, singleMark);
+  } else {
+    // Implement heuristic question detection
+    const lowerText = text.toLowerCase();
+    const questionWords = ["who", "what", "where", "when", "why", "how", "which"];
+    const isQuestion = questionWords.some(qw => new RegExp(`\\b${qw}\\b`).test(lowerText));
+    
+    if (isQuestion) {
+      text += "?";
+    } else {
+      text += ".";
+    }
+  }
+
+  return text;
 }
 
 function capitalize(text) {
+  if (!text) return "";
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 

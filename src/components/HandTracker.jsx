@@ -3,6 +3,7 @@ import { DrawingUtils, HandLandmarker } from "@mediapipe/tasks-vision";
 import { useHandLandmarker } from "../hooks/useHandLandmarker";
 import { StatusBanner } from "./StatusBanner";
 import { CAMERA_CONSTRAINTS } from "../lib/camera";
+import { handColorFor, HAND_JOINT_COLOR } from "../lib/handColors";
 
 const supportsVideoFrameCallback =
   typeof HTMLVideoElement !== "undefined" &&
@@ -163,7 +164,18 @@ export function HandTracker() {
       // relative to whatever image was fed in, so they line up correctly
       // on our full-size display canvas regardless of whether we just
       // detected on the full video or a downscaled copy of it.
-      const result = handLandmarker.detectForVideo(detectionInput, nowMs);
+      let result;
+      try {
+        result = handLandmarker.detectForVideo(detectionInput, nowMs);
+      } catch (err) {
+        // Landmarker closed mid-frame during tab switch/unmount - skip this
+        // frame quietly instead of throwing an uncaught WASM Aborted().
+        if (!runDetection.warned) {
+          console.warn("detectForVideo failed:", err?.message || err);
+          runDetection.warned = true;
+        }
+        return;
+      }
 
       canvasCtx.save();
       canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
@@ -174,17 +186,18 @@ export function HandTracker() {
 
       // Two distinct colors per hand make it visually obvious when both
       // hands are being tracked at once, rather than just drawing
-      // everything the same color.
-      const HAND_COLORS = ["#2DE2E6", "#FFB627"];
-
+      // everything the same color. Colors follow the detected handedness,
+      // not detection order, so the same hand keeps the same color.
       result.landmarks.forEach((landmarks, index) => {
-        const color = HAND_COLORS[index % HAND_COLORS.length];
+        const category = result.handednesses?.[index]?.[0]?.categoryName;
+        const color = handColorFor(category);
+
         drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
           color,
           lineWidth: 3,
         });
         drawingUtils.drawLandmarks(landmarks, {
-          color: "#FF4D6D",
+          color: HAND_JOINT_COLOR,
           lineWidth: 1,
           radius: 4,
         });
@@ -264,7 +277,7 @@ export function HandTracker() {
 
         {cameraStatus === "ready" && !isLoading && !loadError && (
           <div className="absolute top-3 right-3 flex flex-col items-end gap-1">
-            <div className="rounded-md bg-black/60 px-3 py-1 font-mono text-xs text-[#2DE2E6]">
+            <div className="rounded-md bg-black/60 px-3 py-1 font-mono text-xs text-[#55F6E5]">
               {fps} FPS (detection)
             </div>
             <div className="rounded-md bg-black/60 px-3 py-1 font-mono text-[10px] text-[#5C6478]">
@@ -277,7 +290,7 @@ export function HandTracker() {
               </div>
             )}
             {displayScale < 100 && (
-              <div className="rounded-md bg-amber-950 px-3 py-1 font-mono text-[10px] text-amber-300">
+              <div className="border border-[#55F6E5]/40 bg-black px-3 py-2 font-mono text-[10px] text-[#55F6E5]">
                 auto-scaled to {displayScale}% for speed
               </div>
             )}

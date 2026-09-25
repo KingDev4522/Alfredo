@@ -1,156 +1,311 @@
-/**
- * Storage layer for recorded signs, using IndexedDB rather than
- * localStorage.
- *
- * Why IndexedDB and not localStorage: localStorage caps out at roughly
- * 5-10MB per site in most browsers. With 25 signs recorded 10+ times
- * each, at ~2 seconds of landmark data per recording, that limit is
- * realistic to hit. IndexedDB has a vastly higher practical limit (often
- * hundreds of MB or more), is still completely free and fully local to
- * the browser (no server, no account, no cost), and means your recording
- * progress survives accidental page reloads or closing the tab.
- */
-const DB_NAME = "isl-interpreter-recordings";
-const DB_VERSION = 1;
-const STORE_NAME = "recordings";
+// PRD 02 v2 §4 + §5 - Supabase-first storage with FastAPI fallback.
+// When VITE_SUPABASE_URL/KEY are set: main_recordings (shared, admin-write)
+// + user_recordings (owner-only) via Supabase + RLS.
+// When missing (pre-key dev): falls back to legacy FastAPI JSON file backend.
 
-function openDatabase() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+import { supabase, isSupabaseConfigured, API_DB_URL } from "./supabaseClient";
 
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        const store = db.createObjectStore(STORE_NAME, {
-          keyPath: "id",
-          autoIncrement: true,
-        });
-        store.createIndex("signId", "signId", { unique: false });
-      }
-    };
+const LEGACY_URL = API_DB_URL;
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+function currentOwnerId() {
+  return supabase?.auth
+    ? null // resolved async by callers via getSession
+    : null;
 }
 
-/**
- * Saves one recording. A recording is:
- * {
- *   signId: string,          - which word from VOCABULARY this is
- *   recordedBy: string,      - free-text name of whoever performed it
- *   conditionLabel: string,  - free-text tag for the recording batch, e.g.
- *                              "daylight", "lamp-lit", "angled-left",
- *                              "far-distance". Optional, but useful when
- *                              deliberately varying conditions, both to
- *                              stay organized while recording and later
- *                              to see (in Phase 3's accuracy testing)
- *                              whether any particular condition performs
- *                              noticeably worse than others.
- *   handCount: number,       - 1 or 2, how many hands were present
- *   frames: NormalizedHand[][][], - array of frames, each frame is the
- *                                   normalized hands present at that
- *                                   instant (see normalizeSequence in normalize.js)
- *   recordedAt: number,      - timestamp, for our own reference
- * }
- */
-export async function saveRecording(recording) {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.add(recording);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+async function getUser() {
+  if (!isSupabaseConfigured || !supabase) return null;
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user ?? null;
 }
 
+// ---------- legacy FastAPI helpers (pre-Supabase dev path) ----------
+async function legacySaveRecording(recording) {
+  const res = await fetch(`${LEGACY_URL}/recordings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(recording),
+  });
+  if (!res.ok) throw new Error("Failed to save recording");
+  return res.json();
+}
+
+async function legacyGetAll() {
+  let res;
+  try {
+    res = await fetch(`${LEGACY_URL}/recordings`);
+  } catch (error) {
+    throw new Error(`Network error in getAllRecordings: ${error.message}`);
+  }
+  if (!res.ok) throw new Error("Failed to load recordings. Backend might be offline.");
+  return await res.json();
+}
+
+// ---------- dual-storage bridge (PRD 05): GitHub-tracked file <-> Supabase ----------
+// recordings.json stays tracked in git (NOT gitignored) in the exact app shape
+// { signId, recordedBy, conditionLabel, handCount, frames } - Supabase rows map 1:1.
+
+export async function saveToLegacyFile(recording) {
+  return legacySaveRecording({ ...recording });
+}
+
+// Reverse bridge: pull Supabase Main + my recordings into the localhost file
+// so the Translate avatar (which plays the file-derived gloss_poses.json) can
+// sign words recorded in Supabase mode. Signs already present in the file
+// (case-insensitive signId match) are skipped, so repeat runs never duplicate.
+// Requires the localhost backend (writes via /api/db/import, which rebuilds
+// the gloss automatically).
+export async function syncSupabaseToLegacyFile() {
+  if (!isSupabaseConfigured || !supabase) throw new Error("Supabase is not configured yet.");
+  const [main, mine] = await Promise.all([getMainRecordings(), getMyRecordings()]);
+  const candidates = [...main, ...mine].filter(
+    (r) => r && typeof r.signId === "string" && Array.isArray(r.frames) && r.frames.length > 0
+  );
+  let existing = [];
+  try {
+    const res = await fetch(`${LEGACY_URL}/recordings`);
+    if (!res.ok) throw new Error("file unreachable");
+    existing = await res.json();
+  } catch {
+    throw new Error("Localhost backend is offline. Start it on http://localhost:8000 first.");
+  }
+  const have = new Set(
+    (Array.isArray(existing) ? existing : [])
+      .map((r) => r && typeof r.signId === "string" ? r.signId.toUpperCase() : null)
+      .filter(Boolean)
+  );
+  const fresh = candidates.filter((r) => !have.has(r.signId.toUpperCase()));
+  // De-dupe within the batch itself (same sign in both Main and mine): keep longest take.
+  const best = new Map();
+  for (const r of fresh) {
+    const key = r.signId.toUpperCase();
+    if (!best.has(key) || (r.frames.length > best.get(key).frames.length)) best.set(key, r);
+  }
+  const toImport = [...best.values()].map((r) => ({
+    signId: r.signId,
+    recordedBy: r.recordedBy || "Unknown",
+    conditionLabel: r.conditionLabel || "unspecified",
+    handCount: r.handCount ?? 1,
+    frames: r.frames,
+    recordedAt: r.recordedAt || Date.now(),
+  }));
+  if (toImport.length === 0) return { imported: 0, skipped: candidates.length };
+  const res = await fetch(`${LEGACY_URL}/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(toImport),
+  });
+  if (!res.ok) throw new Error("Failed to import Supabase recordings into the localhost file");
+  const data = await res.json();
+  return { imported: data.imported ?? toImport.length, skipped: candidates.length - toImport.length };
+}
+
+// Push every recording currently in the localhost file into Supabase Main.
+// Admin JWT required (RLS). Run once Supabase API is online; repeat runs will
+// duplicate, so prefer running it once per batch of local recordings.
+export async function syncLegacyFileToMain() {
+  if (!isSupabaseConfigured || !supabase) throw new Error("Supabase is not configured yet.");
+  const user = await getUser();
+  if (!user) throw new Error("Sign in as admin first.");
+  const legacy = await legacyGetAll();
+  const rows = legacy
+    .filter((r) => r && typeof r.signId === "string" && Array.isArray(r.frames))
+    .map((r) => ({
+      sign_id: r.signId,
+      recorded_by: r.recordedBy || "admin",
+      condition_label: r.conditionLabel || "unspecified",
+      hand_count: r.handCount ?? 1,
+      frames: r.frames,
+      created_by: user.id,
+    }));
+  if (rows.length === 0) return { pushed: 0 };
+  const CHUNK = 20;
+  let pushed = 0;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const { error } = await supabase.from("main_recordings").insert(rows.slice(i, i + CHUNK));
+    if (error) throw new Error(`Sync to Main failed: ${error.message}`);
+    pushed += Math.min(CHUNK, rows.length - i);
+  }
+  return { pushed };
+}
+
+// ---------- public API (same signatures as before) ----------
+
+export async function getMainRecordings() {
+  if (!isSupabaseConfigured || !supabase) return legacyGetAll();
+  const { data, error } = await supabase
+    .from("main_recordings")
+    .select("id, sign_id, recorded_by, condition_label, hand_count, frames, created_at")
+    .order("created_at", { ascending: true });
+  if (error) throw new Error(`Failed to load Main database: ${error.message}`);
+  return (data || []).map(toAppShape);
+}
+
+export async function getMyRecordings() {
+  if (!isSupabaseConfigured || !supabase) return [];
+  const user = await getUser();
+  if (!user) return [];
+  const { data, error } = await supabase
+    .from("user_recordings")
+    .select("id, sign_id, owner_id, recorded_by, condition_label, hand_count, frames, created_at")
+    .eq("owner_id", user.id)
+    .order("created_at", { ascending: true });
+  if (error) throw new Error(`Failed to load your recordings: ${error.message}`);
+  return (data || []).map(toAppShape);
+}
+
+// Merged view for the interpreter: main + mine (custom-first handled in libraryMerge).
 export async function getAllRecordings() {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readonly");
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+  if (!isSupabaseConfigured || !supabase) return legacyGetAll();
+  const [main, mine] = await Promise.all([getMainRecordings(), getMyRecordings()]);
+  return [...mine.map((r) => ({ ...r, source: "user" })), ...main.map((r) => ({ ...r, source: "main" }))];
+}
+
+// target: 'main' (admin only, RLS-enforced) | 'mine'
+export async function saveRecording(recording, target = "mine") {
+  if (!isSupabaseConfigured || !supabase) return legacySaveRecording(recording);
+  const user = await getUser();
+  if (!user) throw new Error("Sign in to save recordings.");
+  if (target === "main") {
+    const { data, error } = await supabase
+      .from("main_recordings")
+      .insert({
+        sign_id: recording.signId,
+        recorded_by: recording.recordedBy || user.email || "admin",
+        condition_label: recording.conditionLabel || "unspecified",
+        hand_count: recording.handCount,
+        frames: recording.frames,
+        created_by: user.id,
+      })
+      .select()
+      .single();
+    if (error) throw new Error(`Publish to Main failed: ${error.message}`);
+    return toAppShape(data);
+  }
+  const { data, error } = await supabase
+    .from("user_recordings")
+    .insert({
+      owner_id: user.id,
+      sign_id: recording.signId,
+      recorded_by: recording.recordedBy || user.email || "Unknown",
+      condition_label: recording.conditionLabel || "unspecified",
+      hand_count: recording.handCount,
+      frames: recording.frames,
+    })
+    .select()
+    .single();
+  if (error) throw new Error(`Save failed: ${error.message}`);
+  return toAppShape(data);
 }
 
 export async function deleteRecording(id) {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.delete(id);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+  if (!isSupabaseConfigured || !supabase) {
+    const res = await fetch(`${LEGACY_URL}/recordings/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to delete recording");
+    return { fileMirror: 0 };
+  }
+  // PRD 05 dual-delete: remove from BOTH Supabase tables (RLS permits only the
+  // legal one), require at least one row actually removed, then best-effort
+  // mirror into the localhost file by content match (stores use different UUIDs).
+  const user = await getUser();
+  if (!user) throw new Error("Sign in to delete recordings.");
+  const [mine, main] = await Promise.all([
+    supabase.from("user_recordings").delete().eq("id", id).eq("owner_id", user.id)
+      .select("id,sign_id,recorded_by,condition_label,hand_count,frame_count"),
+    supabase.from("main_recordings").delete().eq("id", id)
+      .select("id,sign_id,recorded_by,condition_label,hand_count,frame_count"),
+  ]);
+  if (mine.error && main.error) throw new Error("Failed to delete recording");
+  const mineRemoved = mine.data || [];
+  const mainRemoved = main.data || [];
+  if (mineRemoved.length + mainRemoved.length === 0) {
+    throw new Error("Nothing deleted. Not yours, and not admin.");
+  }
+  // Mirror into the file ONLY for Main deletions: personal rows never live in the
+  // file under Supabase mode, so a twin match there would be someone else's golden.
+  const victim = mainRemoved[0];
+  let fileMirror = 0;
+  if (!victim) return { fileMirror };
+  try {
+    const legacy = await legacyGetAll();
+    const twins = legacy.filter((r) =>
+      r && r.signId === victim.sign_id &&
+      (r.recordedBy || "Unknown") === (victim.recorded_by || "Unknown") &&
+      (r.conditionLabel || "unspecified") === (victim.condition_label || "unspecified") &&
+      (r.handCount ?? 1) === (victim.hand_count ?? 1) &&
+      Array.isArray(r.frames) && r.frames.length === (victim.frame_count ?? -1)
+    );
+    // Same sign + batch + hand + length: the file twin(s) of this exact take.
+    for (const t of twins) {
+      await fetch(`${LEGACY_URL}/recordings/${t.id}`, { method: "DELETE" });
+      fileMirror++;
+    }
+  } catch {
+    // Backend offline - Supabase copy is gone; file copy syncs later.
+  }
+  return { fileMirror };
 }
 
 export async function clearAllRecordings() {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.clear();
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+  if (!isSupabaseConfigured || !supabase) {
+    const res = await fetch(`${LEGACY_URL}/recordings/all`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to clear recordings");
+    return;
+  }
+  const user = await getUser();
+  if (!user) throw new Error("Sign in required.");
+  const { error } = await supabase.from("user_recordings").delete().eq("owner_id", user.id);
+  if (error) throw new Error("Failed to clear your recordings");
 }
 
-/**
- * Deletes every recording for one specific sign, leaving all other signs
- * untouched. Useful when a sign's existing recordings turn out to be the
- * problem (e.g. accuracy testing shows it's being confused with another
- * sign) and you want a clean slate for just that one word, rather than
- * mixing new recordings in with old confusing ones or wiping everything.
- */
-export async function deleteRecordingsForSign(signId) {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    const index = store.index("signId");
-    const request = index.openCursor(IDBKeyRange.only(signId));
-
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (cursor) {
-        cursor.delete();
-        cursor.continue();
-      } else {
-        resolve();
-      }
-    };
-    request.onerror = () => reject(request.error);
-  });
+export async function deleteRecordingsForSign(signId, target = "mine") {
+  if (!isSupabaseConfigured || !supabase) {
+    const res = await fetch(`${LEGACY_URL}/recordings/sign/${signId}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to delete recordings for sign");
+    return;
+  }
+  const user = await getUser();
+  if (!user) throw new Error("Sign in required.");
+  const table = target === "main" ? "main_recordings" : "user_recordings";
+  let q = supabase.from(table).delete().eq("sign_id", signId);
+  if (table === "user_recordings") q = q.eq("owner_id", user.id);
+  const { error } = await q;
+  if (error) throw new Error("Failed to delete recordings for sign");
+  // Dual-delete mirror ONLY for Main clears: the file holds shared goldens, and a
+  // personal clear must never touch it. Same signId semantics on both sides.
+  if (target !== "main") return;
+  try {
+    await fetch(`${LEGACY_URL}/recordings/sign/${signId}`, { method: "DELETE" });
+  } catch {
+    // Backend offline - cloud copy is gone; file copy syncs later.
+  }
 }
 
-/**
- * Returns a { [signId]: count } map, so the UI can show progress per sign
- * without needing to load every recording's full frame data.
- */
 export async function getCountsPerSign() {
   const all = await getAllRecordings();
   const counts = {};
   for (const recording of all) {
-    counts[recording.signId] = (counts[recording.signId] || 0) + 1;
+    const key = recording.signId;
+    counts[key] = (counts[key] || 0) + 1;
   }
   return counts;
 }
 
-/**
- * Imports recordings from a file previously produced by
- * exportAllRecordingsAsFile, merging them into whatever is already stored
- * rather than replacing it. This is how recordings get combined from
- * multiple recorders' separate devices into one central dataset.
- *
- * Each recording is given a fresh auto-assigned id rather than reusing the
- * id from the file — those ids were only ever meaningful within the
- * database they came from, so keeping them risks silently colliding with
- * (and overwriting) an unrelated existing recording here.
- */
-export async function importRecordingsFromFile(file) {
+// Split counts for Record picker: { shared: {}, mine: {} }
+export async function getCountsSplit() {
+  if (!isSupabaseConfigured || !supabase) {
+    const counts = await getCountsPerSign();
+    return { shared: counts, mine: {} };
+  }
+  const [main, mine] = await Promise.all([getMainRecordings(), getMyRecordings()]);
+  const shared = {};
+  const own = {};
+  for (const r of main) shared[r.signId] = (shared[r.signId] || 0) + 1;
+  for (const r of mine) own[r.signId] = (own[r.signId] || 0) + 1;
+  return { shared, mine: own };
+}
+
+export async function importRecordingsFromFile(file, target = "mine") {
   const text = await file.text();
   let payload;
   try {
@@ -161,38 +316,40 @@ export async function importRecordingsFromFile(file) {
 
   const recordings = Array.isArray(payload?.recordings) ? payload.recordings : null;
   if (!recordings) {
-    throw new Error('That file doesn\'t look like a recordings export — expected a "recordings" array.');
+    throw new Error('That file doesn\'t look like a recordings export. Expected a "recordings" array.');
   }
 
-  const db = await openDatabase();
-  let imported = 0;
-  let skipped = 0;
+  const validRecordings = recordings.filter(r => r && typeof r.signId === "string" && Array.isArray(r.frames));
+  const skipped = recordings.length - validRecordings.length;
+  const toImport = validRecordings.map(({ id: _oldId, ...rest }) => rest);
 
-  for (const recording of recordings) {
-    if (!recording || typeof recording.signId !== "string" || !Array.isArray(recording.frames)) {
-      skipped++;
-      continue;
-    }
-    const { id: _oldId, ...rest } = recording;
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.add(rest);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+  if (!isSupabaseConfigured || !supabase) {
+    const res = await fetch(`${LEGACY_URL}/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(toImport),
     });
-    imported++;
+    if (!res.ok) throw new Error("Failed to import recordings to database");
+    const data = await res.json();
+    return { imported: data.imported ?? toImport.length, skipped, total: recordings.length };
   }
 
-  return { imported, skipped, total: recordings.length };
+  const user = await getUser();
+  if (!user) throw new Error("Sign in to import recordings.");
+  const table = target === "main" ? "main_recordings" : "user_recordings";
+  const rows = toImport.map((r) => ({
+    ...(table === "user_recordings" ? { owner_id: user.id } : { created_by: user.id }),
+    sign_id: r.signId,
+    recorded_by: r.recordedBy || user.email || "Unknown",
+    condition_label: r.conditionLabel || "unspecified",
+    hand_count: r.handCount ?? 1,
+    frames: r.frames,
+  }));
+  const { error } = await supabase.from(table).insert(rows);
+  if (error) throw new Error(`Import failed: ${error.message}`);
+  return { imported: rows.length, skipped, total: recordings.length };
 }
 
-/**
- * Triggers a browser download of every recording as a single JSON file.
- * This is the file we'll feed into Phase 3 to build the recognition
- * engine, so it's worth keeping a backup copy of this export somewhere
- * safe once recording is done.
- */
 export async function exportAllRecordingsAsFile() {
   const all = await getAllRecordings();
   const payload = {
@@ -201,7 +358,7 @@ export async function exportAllRecordingsAsFile() {
     recordings: all,
   };
 
-  const blob = new Blob([JSON.stringify(payload)], {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
     type: "application/json",
   });
   const url = URL.createObjectURL(blob);
@@ -216,3 +373,21 @@ export async function exportAllRecordingsAsFile() {
 
   URL.revokeObjectURL(url);
 }
+
+// Supabase snake_case -> app camelCase
+function toAppShape(row) {
+  if (!row) return row;
+  return {
+    id: row.id,
+    signId: row.sign_id ?? row.signId,
+    recordedBy: row.recorded_by ?? row.recordedBy,
+    conditionLabel: row.condition_label ?? row.conditionLabel,
+    handCount: row.hand_count ?? row.handCount,
+    frames: row.frames,
+    recordedAt: row.created_at ? Date.parse(row.created_at) : row.recordedAt,
+    created_at: row.created_at,
+    source: row.source,
+  };
+}
+
+export { currentOwnerId };

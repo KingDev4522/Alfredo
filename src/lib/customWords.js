@@ -1,20 +1,10 @@
 import { VOCABULARY } from "./vocabulary";
+import { supabase, isSupabaseConfigured } from "./supabaseClient";
+import { getAllRecordings } from "./recordingStorage";
 
-/**
- * Custom words — for things with no fixed ISL sign, like a person's own
- * name — work with zero extra recognition code. Since the recognizer
- * just groups recordings by whatever signId is actually in the data (see
- * buildTemplateLibrary in recognizer.js), a custom word recorded through
- * the exact same Record Signs flow is picked up by the live interpreter
- * automatically, the moment it's recorded — no retraining, no separate
- * pipeline. This file only needs to solve one small remaining problem:
- * letting the person define a new word's label before they've recorded
- * anything for it yet, and remembering that definition across reloads.
- *
- * Stored in localStorage rather than IndexedDB — this is tiny metadata
- * (a label and an id), not landmark data, so a heavier database doesn't
- * add anything here.
- */
+// Custom words: Supabase `custom_words` when configured, localStorage fallback otherwise.
+// Global admin words (is_global) are visible to everyone; personal words are owner-only.
+
 const STORAGE_KEY = "isl-custom-words";
 
 export function getCustomWords() {
@@ -38,15 +28,15 @@ function slugify(label) {
     .replace(/^_+|_+$/g, "");
 }
 
-/**
- * Adds a new custom word from a typed label, returning the created word
- * (or the existing one, if this exact word was already added — adding
- * the same word twice just reuses it rather than creating a duplicate).
- * Returns null if the label was empty/invalid.
- */
-export function addCustomWord(label) {
-  const id = slugify(label);
+export function addCustomWord(label, explicitId = null) {
+  const id = explicitId || slugify(label);
   if (!id) return null;
+
+  // never shadow the fixed vocabulary - e.g. recording signId "food" must not
+  // create a second Custom "food" entry that collides on key={word.id}
+  if (VOCABULARY.some((w) => w.id === id)) {
+    return VOCABULARY.find((w) => w.id === id);
+  }
 
   const words = getCustomWords();
   const existing = words.find((w) => w.id === id);
@@ -54,18 +44,42 @@ export function addCustomWord(label) {
 
   const newWord = { id, label: label.trim(), category: "Custom", twoHanded: false };
   saveCustomWords([...words, newWord]);
+
+  // Fire-and-forget cloud mirror (best effort; RLS decides).
+  if (isSupabaseConfigured && supabase) {
+    supabase.auth.getSession().then(({ data }) => {
+      const user = data.session?.user;
+      if (!user) return;
+      supabase.from("custom_words").upsert(
+        { owner_id: user.id, word_id: id, label: label.trim(), is_global: false },
+        { onConflict: "owner_id,word_id" }
+      );
+    });
+  }
   return newWord;
 }
 
 export function removeCustomWord(id) {
   saveCustomWords(getCustomWords().filter((w) => w.id !== id));
+  if (isSupabaseConfigured && supabase) {
+    supabase.auth.getSession().then(({ data }) => {
+      const user = data.session?.user;
+      if (!user) return;
+      supabase.from("custom_words").delete().eq("owner_id", user.id).eq("word_id", id);
+    });
+  }
 }
 
-/** The fixed vocabulary plus any custom words, for anywhere that needs
- * the complete, current word list — the sign picker, label lookups, etc.
- */
 export function getAllWords() {
-  return [...VOCABULARY, ...getCustomWords()];
+  // deduplicate - a stale localStorage entry for "food"/"hello" must not
+  // produce two React children with the same key
+  const vocabIds = new Set(VOCABULARY.map((w) => w.id));
+  const customs = getCustomWords().filter((w) => !vocabIds.has(w.id));
+  // self-heal: purge any stale shadowing entries from storage
+  if (customs.length !== getCustomWords().length) {
+    try { saveCustomWords(customs); } catch {}
+  }
+  return [...VOCABULARY, ...customs];
 }
 
 export function getAllCategories() {
@@ -78,4 +92,51 @@ export function getAllCategories() {
     }
   }
   return categories;
+}
+
+export async function syncCustomWordsWithDatabase() {
+  try {
+    // Merge cloud words first (global + own), then unknown signIds from recordings.
+    if (isSupabaseConfigured && supabase) {
+      const { data: session } = await supabase.auth.getSession();
+      const user = session.session?.user;
+      const { data: cloudWords } = await supabase
+        .from("custom_words")
+        .select("owner_id, word_id, label, is_global");
+      const known = new Set(getAllWords().map((w) => w.id));
+      let updated = false;
+      for (const cw of cloudWords || []) {
+        if (cw.is_global || (user && cw.owner_id === user.id)) {
+          if (!known.has(cw.word_id)) {
+            addCustomWord(cw.label, cw.word_id);
+            updated = true;
+          }
+        }
+      }
+      if (updated) return true;
+    }
+    const recordings = await getAllRecordings();
+    const currentWords = getAllWords();
+    const knownIds = new Set(currentWords.map(w => w.id));
+
+    const dbIds = new Set();
+    for (const r of recordings) {
+      if (r && r.signId) {
+        dbIds.add(r.signId);
+      }
+    }
+
+    let updated = false;
+    for (const id of dbIds) {
+      if (!knownIds.has(id)) {
+        const label = id.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+        addCustomWord(label, id);
+        updated = true;
+      }
+    }
+    return updated;
+  } catch (err) {
+    console.error("Failed to sync custom words with database:", err);
+    return false;
+  }
 }

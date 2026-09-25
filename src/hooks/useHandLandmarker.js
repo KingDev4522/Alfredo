@@ -14,13 +14,13 @@ const MODEL_ASSET_PATH =
 const WASM_PATH = "/wasm";
 
 // numHands is 2. "Help" in our vocabulary is naturally two-handed in ISL
-// (verified against ISLRTC — Sorry, Thank You, and Pain turned out to be
+// (verified against ISLRTC - Sorry, Thank You, and Pain turned out to be
 // one-handed, contrary to an earlier assumption), so we still need two
 // hands trackable at once, just for a smaller set than originally thought.
 //
 // This sounds like "double the work" compared to one hand, but it mostly
-// isn't. The expensive step — searching the entire frame to find a hand
-// at all — runs once per frame either way, and finds up to numHands hands
+// isn't. The expensive step - searching the entire frame to find a hand
+// at all - runs once per frame either way, and finds up to numHands hands
 // in that same single pass. Going from 1 to 2 mainly adds one extra cheap
 // landmark pass for the second hand, not a second full search. Combined
 // with everything else already in place (GPU delegate, lower resolution,
@@ -72,7 +72,7 @@ export function useHandLandmarker() {
 
   useEffect(() => {
     // In development, React intentionally runs this effect twice in a row
-    // to surface bugs. We don't block the second run — each run tracks
+    // to surface bugs. We don't block the second run - each run tracks
     // its own cancellation independently, so whichever one finishes while
     // still "active" is the one that updates state. This is the correct
     // pattern; trying to block the second run entirely is what caused the
@@ -111,7 +111,7 @@ export function useHandLandmarker() {
           setLoadError(
             "Could not load the hand tracking model on either GPU or CPU. " +
               "Open the browser console (F12) to see the exact error. " +
-              "This usually means no internet connection on first load — " +
+              "This usually means no internet connection on first load. " +
               "try a hard refresh (Ctrl+Shift+R) once connected."
           );
           setIsLoading(false);

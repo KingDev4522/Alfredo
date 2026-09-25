@@ -21,7 +21,7 @@ const FINGERTIP_INDICES = new Set([4, 8, 12, 16, 20]);
  * across its length, rather than comparing every single frame.
  *
  * WHY THIS IS SAFE: with the vocabulary now mostly static, held signs,
- * consecutive frames are highly redundant — a hand held still for 500ms
+ * consecutive frames are highly redundant - a hand held still for 500ms
  * produces maybe 15 frames that are nearly identical to each other. Those
  * extra frames cost real computation time (DTW cost scales with sequence
  * length) without adding real discriminating information. Downsampling
@@ -29,7 +29,7 @@ const FINGERTIP_INDICES = new Set([4, 8, 12, 16, 20]);
  * off the end), it just stops paying for near-duplicate frames.
  *
  * This is exactly the kind of change that needs verifying, not assuming
- * — see scripts/evaluate.mjs, which confirmed this costs no measurable
+ * - see scripts/evaluate.mjs, which confirmed this costs no measurable
  * accuracy on the real recorded vocabulary before it was kept.
  */
 function downsample(sequence, maxFrames) {
@@ -64,31 +64,55 @@ function handDistance(handA, handB, landmarkWeight) {
 }
 
 /**
- * Distance between two full frames, each frame being an array of 1 or 2
- * hands. For two-handed frames, hand ORDER is not guaranteed to be
- * consistent between recordings (MediaPipe doesn't reliably return "left
- * hand first" every time), so we try both pairings and take whichever is
- * cheaper — this makes the comparison hand-order-invariant without
- * needing separately recorded handedness metadata.
+ * Distance between two full frames, each frame being an object with
+ * `left_hand` / `right_hand` 21-point arrays.
+ *
+ * HAND-DROPOUT TOLERANCE: MediaPipe intermittently loses a hand for a frame
+ * or two (especially when both hands are close together and occlude each
+ * other, e.g. an "A" pose with joined hands). The old code charged a flat
+ * PENALTY of 999 for ANY frame where one side had a hand and the other did
+ * not, and then SUMMED all hand distances. That made a 2-hand template score
+ * ~2x worse than a 1-hand one purely for existing, and a single dropout frame
+ * was enough to guarantee the whole sign could never be recognized
+ * (30% dropout measured confidence 0.0018 against a 0.36 threshold).
+ *
+ * Now: a missing hand costs a moderate, bounded penalty, and the frame
+ * distance is averaged over the hands actually compared, so one-hand and
+ * two-hand frames live on the same scale and brief dropouts no longer
+ * destroy an otherwise good match.
  */
-function frameDistance(frameA, frameB, landmarkWeight) {
-  const handCount = Math.min(frameA.length, frameB.length);
+const MISSING_HAND_PENALTY = 3.0;
 
-  if (handCount === 0) return 0;
+function frameDistance(frameA_obj, frameB_obj, landmarkWeight) {
+  const extractHands = (frame) => ({
+    left: frame.left_hand && frame.left_hand.length > 0 ? frame.left_hand : null,
+    right: frame.right_hand && frame.right_hand.length > 0 ? frame.right_hand : null,
+  });
 
-  if (handCount === 1) {
-    return handDistance(frameA[0], frameB[0], landmarkWeight);
+  const frameA = extractHands(frameA_obj.landmarks || frameA_obj);
+  const frameB = extractHands(frameB_obj.landmarks || frameB_obj);
+
+  let totalDistance = 0;
+  let compared = 0;
+
+  if (frameA.left && frameB.left) {
+    totalDistance += handDistance(frameA.left, frameB.left, landmarkWeight);
+    compared++;
+  } else if (frameA.left || frameB.left) {
+    totalDistance += MISSING_HAND_PENALTY;
+    compared++;
   }
 
-  // Two hands: try both pairings, keep the cheaper one.
-  const directCost =
-    handDistance(frameA[0], frameB[0], landmarkWeight) +
-    handDistance(frameA[1], frameB[1], landmarkWeight);
-  const swappedCost =
-    handDistance(frameA[0], frameB[1], landmarkWeight) +
-    handDistance(frameA[1], frameB[0], landmarkWeight);
+  if (frameA.right && frameB.right) {
+    totalDistance += handDistance(frameA.right, frameB.right, landmarkWeight);
+    compared++;
+  } else if (frameA.right || frameB.right) {
+    totalDistance += MISSING_HAND_PENALTY;
+    compared++;
+  }
 
-  return Math.min(directCost, swappedCost);
+  // Average over compared hands so hand-count does not change the distance scale.
+  return compared > 0 ? totalDistance / compared : 0;
 }
 
 /**
@@ -96,7 +120,7 @@ function frameDistance(frameA, frameB, landmarkWeight) {
  * Sakoe-Chiba band to constrain how far the alignment can stretch.
  *
  * Without a band, DTW compares every frame of A against every frame of B
- * (an nA x nB grid) — for a "Help" recording vs a "Help" template that's
+ * (an nA x nB grid) - for a "Help" recording vs a "Help" template that's
  * fine, but as more templates accumulate this can slow down. The band
  * restricts the alignment path to stay within `bandWidth` frames of the
  * diagonal, which is a reasonable assumption (a 2-second sign shouldn't
@@ -112,7 +136,7 @@ export function dtwDistance(seqA, seqB, options = {}) {
   seqB = downsample(seqB, maxFrames);
 
   // bandFraction default of 0.20 was re-confirmed after fixing the
-  // length-mismatch bug above — 0.15/0.20/0.25 all tie at 92.2% accuracy
+  // length-mismatch bug above - 0.15/0.20/0.25 all tie at 92.2% accuracy
   // on the real recorded vocabulary (see scripts/evaluate.mjs); 0.20 is
   // the middle of that tied range, for a little extra robustness margin.
   // K=1 nearest-match remains the better choice, confirmed the same way.
@@ -124,7 +148,7 @@ export function dtwDistance(seqA, seqB, options = {}) {
   if (nA === 0 || nB === 0) return Infinity;
 
   // CRITICAL: bandWidth must always be at least |nA - nB|, or no valid
-  // alignment path can even reach the end of the grid — the DP table's
+  // alignment path can even reach the end of the grid - the DP table's
   // final cell becomes mathematically unreachable within the band, and
   // this function would silently return Infinity (behaving like an
   // automatic non-match) for any two sequences that differ in length by
@@ -135,10 +159,10 @@ export function dtwDistance(seqA, seqB, options = {}) {
   // exercised this path. Live segments can legitimately run much longer
   // than the recorded templates (recordings average ~34 frames; a live
   // segment can run up to ~90), so the proportional band alone wasn't
-  // enough — it needs to explicitly cover the raw length gap too, plus
+  // enough - it needs to explicitly cover the raw length gap too, plus
   // some slack for genuine time-warping flexibility beyond just that gap.
   // some slack for genuine time-warping flexibility beyond just that gap
-  // (a small 5% margin — enough to allow real warping room without
+  // (a small 5% margin - enough to allow real warping room without
   // widening the band so much it costs matching precision; confirmed via
   // scripts/evaluate.mjs that this keeps the full 92.2% accuracy while
   // still fixing the length-mismatch bug).

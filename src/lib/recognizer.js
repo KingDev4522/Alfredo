@@ -3,7 +3,7 @@ import { dtwDistance } from "./dtw.js";
 /**
  * Fingertip-weighted landmark weighting: fingertips count 2.5x more than
  * other landmarks. Whether this actually helps on our vocabulary is
- * something we test empirically (see evaluate.mjs) rather than assume —
+ * something we test empirically (see evaluate.mjs) rather than assume - 
  * this export exists so both the evaluation script and the live app use
  * the exact same weighting function once we know which one wins.
  */
@@ -21,7 +21,7 @@ export function uniformWeight() {
  * "buckets" by hand count, since a live gesture should only ever be
  * compared against templates with the same number of hands. This also
  * means a one-handed query never accidentally gets matched against a
- * two-handed template (or vice versa) — hand count is a hard, free filter
+ * two-handed template (or vice versa) - hand count is a hard, free filter
  * before any DTW computation happens at all.
  */
 export function buildTemplateLibrary(recordings) {
@@ -44,7 +44,7 @@ export function buildTemplateLibrary(recordings) {
  * options.k: how many nearest templates vote on the answer (default 1,
  * meaning simple nearest-match). Using k > 1 with distance-weighted
  * voting can smooth out the effect of any single unusual template being
- * the closest match — see evaluate.mjs for whether this actually helps
+ * the closest match - see evaluate.mjs for whether this actually helps
  * on our vocabulary rather than assuming it does.
  */
 export function classifySequence(liveFrames, templateLibrary, options = {}) {
@@ -58,7 +58,7 @@ export function classifySequence(liveFrames, templateLibrary, options = {}) {
   // Search the hand-count bucket that matches what was detected live, but
   // ALSO include the other bucket rather than hard-filtering it out
   // entirely. Live hand-count detection is noisier than the controlled
-  // conditions recordings were captured under — a two-handed sign like
+  // conditions recordings were captured under - a two-handed sign like
   // "Help" can easily have its majority vote land on 1 hand for a given
   // live segment if the second hand briefly loses tracking, and hard-
   // filtering would make that sign impossible to ever match in that case.
@@ -74,7 +74,7 @@ export function classifySequence(liveFrames, templateLibrary, options = {}) {
     return { signId: null, distance: Infinity, confidence: 0, runnerUp: null };
   }
 
-  // Compute distance to every candidate template, keep them all sorted —
+  // Compute distance to every candidate template, keep them all sorted - 
   // we need the k nearest, not just the single nearest.
   const distances = candidates.map((template) => ({
     signId: template.signId,
@@ -121,7 +121,7 @@ export function classifySequence(liveFrames, templateLibrary, options = {}) {
 
 /**
  * The confidence threshold below which a match should be treated as
- * "not recognized" rather than accepted. This isn't a guess — it was
+ * "not recognized" rather than accepted. This isn't a guess - it was
  * found by sweeping real threshold values against actual recorded data
  * and picking the point that best separates genuinely-correct matches
  * from wrong ones (see scripts/evaluate.mjs). Re-run that script and
@@ -133,7 +133,7 @@ export const CONFIDENCE_THRESHOLD = 0.36;
  * Converts a raw DTW distance into a 0-1 confidence score. Smaller
  * distance = higher confidence. The exact shape of this curve was tuned
  * against real recorded data (see evaluate.mjs) rather than picked
- * arbitrarily — `scale` is the distance at which confidence drops to ~50%.
+ * arbitrarily - `scale` is the distance at which confidence drops to ~50%.
  */
 function distanceToConfidence(distance, scale = 0.6) {
   if (!Number.isFinite(distance)) return 0;
@@ -143,7 +143,12 @@ function distanceToConfidence(distance, scale = 0.6) {
 function mostCommonHandCount(frames) {
   const counts = {};
   for (const frame of frames) {
-    if (frame.length > 0) counts[frame.length] = (counts[frame.length] || 0) + 1;
+    let handCount = 0;
+    // Dynamically count hands based on the V2 object schema
+    if (frame.left_hand && frame.left_hand.length > 0) handCount++;
+    if (frame.right_hand && frame.right_hand.length > 0) handCount++;
+    
+    if (handCount > 0) counts[handCount] = (counts[handCount] || 0) + 1;
   }
   let best = 0;
   let bestCount = -1;

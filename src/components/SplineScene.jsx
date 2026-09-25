@@ -1,28 +1,48 @@
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Component, Suspense, lazy, useEffect, useRef, useState } from "react";
 
 const Spline = lazy(() => import("@splinetool/react-spline"));
 
+class SplineErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(err) {
+    console.warn("Spline WebGL failed, showing fallback:", err?.message);
+  }
+  render() {
+    if (this.state.failed) return this.props.fallback;
+    return this.props.children;
+  }
+}
+
+function SplineStaticFallback() {
+  return (
+    <div className="grid h-full min-h-[220px] w-full place-items-center bg-[radial-gradient(ellipse_at_top,_rgba(0,229,255,0.12),transparent_60%),#070A12] p-6">
+      <div className="cyber-panel grid min-w-64 gap-3 p-5 text-center">
+        <span className="text-sm text-[rgba(242,240,232,0.68)]">3D preview unavailable on this device. Recording still works below.</span>
+      </div>
+    </div>
+  );
+}
+
 function SplineFallback() {
   return (
-    <div className="w-full h-full flex items-center justify-center min-h-[220px]">
-      <div className="flex flex-col items-center gap-3">
-        <div
-          className="w-9 h-9 rounded-full border-2 animate-spin"
-          style={{ borderColor: "#2DE2E6", borderTopColor: "transparent" }}
-        />
-        <span
-          className="text-[10px] uppercase tracking-[0.25em]"
-          style={{ color: "#5C6478", fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          Loading scene
-        </span>
+    <div className="grid min-h-[220px] w-full place-items-center bg-black p-6">
+      <div className="cyber-panel grid min-w-64 gap-3 p-5 text-center">
+        <span className="cyber-page__eyebrow justify-center before:hidden">Scene uplink</span>
+        <span className="text-sm text-[rgba(242,240,232,0.68)]">Loading 3D capture module.</span>
+        <span className="h-1 w-full bg-[#FFB000] shadow-[0_0_12px_rgba(255,176,0,0.45)]" />
       </div>
     </div>
   );
 }
 
 /**
- * Thin wrapper around the Spline runtime — lazy-loaded so its (large)
+ * Thin wrapper around the Spline runtime - lazy-loaded so its (large)
  * bundle only loads on pages that actually use it, with a branded
  * fallback while the scene boots.
  *
@@ -34,7 +54,7 @@ function SplineFallback() {
  * scrolls back near it.
  *
  * scale: enlarging this component's container does NOT make the 3D
- * object itself bigger — Spline's own camera framing just reveals
+ * object itself bigger - Spline's own camera framing just reveals
  * more empty space around it. To actually make the subject look
  * bigger, we CSS-zoom the rendered output itself (cropped by the
  * container's overflow:hidden).
@@ -67,9 +87,11 @@ export function SplineScene({ scene, className = "", style, onLoad, unmountWhenO
         }}
       >
         {isNear ? (
-          <Suspense fallback={<SplineFallback />}>
-            <Spline scene={scene} onLoad={onLoad} style={{ width: "100%", height: "100%" }} />
-          </Suspense>
+          <SplineErrorBoundary fallback={<SplineStaticFallback />}>
+            <Suspense fallback={<SplineFallback />}>
+              <Spline scene={scene} onLoad={onLoad} style={{ width: "100%", height: "100%" }} />
+            </Suspense>
+          </SplineErrorBoundary>
         ) : (
           <div style={{ width: "100%", height: "100%" }} />
         )}

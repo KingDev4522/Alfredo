@@ -1,85 +1,110 @@
 /**
- * Normalizes an ENTIRE recorded sequence of hand landmark frames using one
- * fixed reference point and one fixed scale for the whole recording — not
- * recalculated fresh on every frame.
+ * Normalizes an ENTIRE recorded sequence of frames using the torso
+ * as the fixed reference point and scale for the whole recording.
  *
- * WHY THIS MATTERS — read this before changing anything here:
+ * THE NEW LOGIC (v3 Dual-Tracker with Split Z-Axis):
+ * Origin: Midpoint between the left and right shoulders.
+ * Scale: Distance between the left and right shoulders (shoulder width).
  *
- * An earlier version of this normalized each frame independently, re-
- * centering every single frame around that frame's own current wrist
- * position. That works fine for signs where the meaning lives entirely in
- * the hand's shape (finger positions, orientation) and the hand barely
- * translates through space. But it silently breaks any sign whose meaning
- * depends on the hand MOVING — for example "Hello," where a flat hand
- * starts near the head and moves outward. Re-centering every frame around
- * its own current wrist position makes the hand's shape relative to itself
- * look identical whether it's near the head or far away, so the motion
- * gets erased and playback looks like the hand never moved at all.
+ * CRITICAL Z-AXIS STRATEGY:
+ * - BODY joints (shoulders, elbows, wrists): Z is flattened to 0.
+ *   PoseLandmarker Z is hip-relative and incompatible with hand Z.
+ * - HAND landmarks (21 points per hand): Z is PRESERVED as-is.
+ *   HandLandmarker Z is wrist-relative and describes the actual 3D
+ *   curvature of the fingers, which is essential for finger articulation
+ *   in the avatar and for accurate DTW handshape matching.
  *
- * Since DTW's whole advantage is comparing motion TRAJECTORIES over time,
- * per-frame normalization was undermining the exact reason we chose DTW in
- * the first place.
- *
- * THE FIX: compute ONE reference point and ONE scale for the entire
- * recording (from the whole sequence), then apply that same fixed
- * reference/scale to every frame. This keeps the sign independent of
- * WHERE in the camera frame it happened and HOW CLOSE to the camera the
- * person was standing, while fully preserving how the hand(s) actually
- * moved during the sign — which is exactly what we want DTW comparing.
- *
- * Two-handed signs (only "Help" in our vocabulary, per ISLRTC verification —
- * Sorry, Thank You, and Pain turned out to be one-handed) use the midpoint
- * between
- * both wrists as the reference point, and the average of each hand's own
- * wrist-to-middle-fingertip distance as the scale — not the distance
- * between the two wrists, since hands moving together/apart is often part
- * of the sign's meaning and shouldn't be normalized away.
+ * This mathematically anchors all hand and elbow movements relative to
+ * the person's torso, making the recording completely independent of
+ * how close they are to the camera or where they stand in the frame,
+ * while perfectly preserving the true kinematic trajectories of the arms
+ * AND the 3D finger articulation of the hands.
  */
 export function normalizeSequence(rawFrames) {
-  const handCounts = rawFrames.map((f) => f.length).filter((c) => c > 0);
-  if (handCounts.length === 0) {
-    return rawFrames.map(() => []);
-  }
-
-  const majorityCount = mostCommonValue(handCounts);
-  // Only use frames matching the sign's real hand count to compute the
-  // reference — ignores stray single-frame detection dropouts so they
-  // don't skew the reference point or scale.
-  const referenceFrames = rawFrames.filter((f) => f.length === majorityCount);
-
-  let refPoint, refScale;
-
-  if (majorityCount === 1) {
-    refPoint = averagePoint(referenceFrames.map((f) => f[0][0])); // wrist
-    refScale = average(referenceFrames.map((f) => handScale(f[0])));
-  } else {
-    refPoint = averagePoint(
-      referenceFrames.map((f) => midpoint(f[0][0], f[1][0]))
-    );
-    refScale = average(
-      referenceFrames.map((f) => (handScale(f[0]) + handScale(f[1])) / 2)
-    );
-  }
-
-  const safeRefScale = safeScale(refScale);
-
-  return rawFrames.map((frame) =>
-    frame.map((hand) => applyNormalization(hand, refPoint, safeRefScale))
+  // Only use frames where the body was successfully detected to compute ref
+  const validFrames = rawFrames.filter(
+    (f) => f.body && f.body.left_shoulder && f.body.right_shoulder
   );
-}
 
-function mostCommonValue(values) {
-  const counts = {};
-  for (const v of values) counts[v] = (counts[v] || 0) + 1;
-  let best = values[0];
-  let bestCount = -1;
-  for (const [value, count] of Object.entries(counts)) {
-    if (count > bestCount) {
-      bestCount = count;
-      best = Number(value);
-    }
+  if (validFrames.length === 0) {
+    return { frames: rawFrames, normalized: false };
   }
-  return best;
+
+  // 1. Calculate the reference origin (average shoulder midpoint across recording)
+  const midpoints = validFrames.map((f) =>
+    midpoint(f.body.left_shoulder, f.body.right_shoulder)
+  );
+  const refPoint = averagePoint(midpoints);
+
+  // 2. Calculate the reference scale (average shoulder width across recording)
+  const widths = validFrames.map((f) =>
+    distanceBetween(f.body.left_shoulder, f.body.right_shoulder)
+  );
+  const refScale = safeScale(average(widths));
+
+  // 3. Apply initial normalization to EVERY coordinate in every frame
+  const baseNormalizedFrames = rawFrames.map((frame) => {
+    const normalizedBody = {};
+    if (frame.body) {
+      for (const [joint, point] of Object.entries(frame.body)) {
+        if (point) {
+          normalizedBody[joint] = applyNormalization(point, refPoint, refScale);
+        } else {
+          normalizedBody[joint] = null;
+        }
+      }
+    }
+
+    return {
+      body: normalizedBody,
+      left_hand: frame.left_hand ? frame.left_hand.map((p) => applyHandNormalization(p, refPoint, refScale)) : null,
+      right_hand: frame.right_hand ? frame.right_hand.map((p) => applyHandNormalization(p, refPoint, refScale)) : null,
+    };
+  });
+  
+  // 4. Temporal Low-Pass Filter (5-frame moving average) exclusively for Body Z
+  const windowSize = 5;
+  const halfWindow = Math.floor(windowSize / 2);
+  
+  const finalFrames = baseNormalizedFrames.map((frame, i) => {
+    const filteredBody = {};
+    if (frame.body) {
+      for (const joint of Object.keys(frame.body)) {
+        if (!frame.body[joint]) {
+          filteredBody[joint] = null;
+          continue;
+        }
+        
+        const newJoint = { x: frame.body[joint].x, y: frame.body[joint].y, z: frame.body[joint].z };
+        
+        // Moving average for Z-axis
+        let zSum = 0;
+        let validZCount = 0;
+        
+        for (let j = Math.max(0, i - halfWindow); j <= Math.min(baseNormalizedFrames.length - 1, i + halfWindow); j++) {
+          const neighborFrame = baseNormalizedFrames[j];
+          if (neighborFrame.body && neighborFrame.body[joint]) {
+            zSum += neighborFrame.body[joint].z;
+            validZCount++;
+          }
+        }
+        
+        if (validZCount > 0) {
+          newJoint.z = round(zSum / validZCount);
+        }
+        
+        filteredBody[joint] = newJoint;
+      }
+    }
+    
+    return {
+      body: filteredBody,
+      left_hand: frame.left_hand, // Hand bypasses the filter to preserve 3D volume
+      right_hand: frame.right_hand,
+    };
+  });
+  
+  return { frames: finalFrames, normalized: true };
 }
 
 function midpoint(a, b) {
@@ -98,32 +123,42 @@ function average(values) {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-function handScale(hand) {
-  return distanceBetween(hand[0], hand[12]); // wrist to middle fingertip
-}
-
 function safeScale(scale) {
-  // Guards against division by zero in a degenerate/invalid recording.
+  // Guards against division by zero
   return scale > 0.0001 ? scale : 1;
 }
 
-function applyNormalization(hand, referencePoint, scale) {
-  return hand.map((point) => ({
+function applyNormalization(point, referencePoint, scale) {
+  return {
     x: round((point.x - referencePoint.x) / scale),
     y: round((point.y - referencePoint.y) / scale),
-    z: round((point.z - referencePoint.z) / scale),
-  }));
+    z: round((point.z - referencePoint.z) / scale), // Restored true volumetric depth relative to chest
+  };
+}
+
+/**
+ * Hand landmarks get X/Y normalized the same way as body joints, but Z
+ * is PRESERVED relative to the wrist. However, to maintain the correct
+ * spatial aspect ratio (since X and Y are divided by the shoulder scale),
+ * we MUST also divide Z by the same scale. Failing to scale Z uniformly
+ * squashes the 3D direction vectors and breaks the finger articulation angles.
+ */
+function applyHandNormalization(point, referencePoint, scale) {
+  return {
+    x: round((point.x - referencePoint.x) / scale),
+    y: round((point.y - referencePoint.y) / scale),
+    z: round(point.z / scale), // Uniformly scaled to preserve 3D angle aspect ratios
+  };
 }
 
 function distanceBetween(a, b) {
+  // Use only X and Y for scale calculation
   return Math.sqrt(
-    Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2) + Math.pow(a.z - b.z, 2)
+    Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2)
   );
 }
 
-// Rounding to 4 decimal places keeps plenty of precision for this purpose
-// while meaningfully reducing the size of stored/exported recordings,
-// since we'll be saving thousands of these numbers per recording.
+// Rounding to 4 decimal places keeps plenty of precision
 function round(value) {
   return Math.round(value * 10000) / 10000;
 }
