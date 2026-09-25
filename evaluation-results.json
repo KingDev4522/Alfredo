@@ -1,0 +1,193 @@
+{
+  "bestBand": 0.2,
+  "bestK": 1,
+  "accuracy": 0.9753521126760564,
+  "perSign": {
+    "hello": {
+      "correct": 12,
+      "total": 12
+    },
+    "thank_you": {
+      "correct": 12,
+      "total": 12
+    },
+    "food": {
+      "correct": 12,
+      "total": 12
+    },
+    "pain": {
+      "correct": 11,
+      "total": 12
+    },
+    "stop": {
+      "correct": 12,
+      "total": 12
+    },
+    "i_me": {
+      "correct": 10,
+      "total": 12
+    },
+    "you": {
+      "correct": 12,
+      "total": 12
+    },
+    "one": {
+      "correct": 8,
+      "total": 8
+    },
+    "three": {
+      "correct": 8,
+      "total": 8
+    },
+    "four": {
+      "correct": 8,
+      "total": 8
+    },
+    "good_bad": {
+      "correct": 11,
+      "total": 12
+    },
+    "no": {
+      "correct": 11,
+      "total": 12
+    },
+    "hungry": {
+      "correct": 12,
+      "total": 12
+    },
+    "two": {
+      "correct": 8,
+      "total": 8
+    },
+    "please": {
+      "correct": 11,
+      "total": 12
+    },
+    "what": {
+      "correct": 11,
+      "total": 12
+    },
+    "help": {
+      "correct": 12,
+      "total": 12
+    },
+    "where": {
+      "correct": 12,
+      "total": 12
+    },
+    "emergency": {
+      "correct": 12,
+      "total": 12
+    },
+    "how": {
+      "correct": 12,
+      "total": 12
+    },
+    "name": {
+      "correct": 12,
+      "total": 12
+    },
+    "doctor": {
+      "correct": 12,
+      "total": 12
+    },
+    "yes": {
+      "correct": 12,
+      "total": 12
+    },
+    "sorry": {
+      "correct": 12,
+      "total": 12
+    },
+    "water": {
+      "correct": 12,
+      "total": 12
+    }
+  },
+  "confusion": {
+    "hello": {
+      "hello": 12
+    },
+    "thank_you": {
+      "thank_you": 12
+    },
+    "food": {
+      "food": 12
+    },
+    "pain": {
+      "good_bad": 1,
+      "pain": 11
+    },
+    "stop": {
+      "stop": 12
+    },
+    "i_me": {
+      "food": 1,
+      "i_me": 10,
+      "you": 1
+    },
+    "you": {
+      "you": 12
+    },
+    "one": {
+      "one": 8
+    },
+    "three": {
+      "three": 8
+    },
+    "four": {
+      "four": 8
+    },
+    "good_bad": {
+      "good_bad": 11,
+      "four": 1
+    },
+    "no": {
+      "no": 11,
+      "pain": 1
+    },
+    "hungry": {
+      "hungry": 12
+    },
+    "two": {
+      "two": 8
+    },
+    "please": {
+      "please": 11,
+      "food": 1
+    },
+    "what": {
+      "what": 11,
+      "hungry": 1
+    },
+    "help": {
+      "help": 12
+    },
+    "where": {
+      "where": 12
+    },
+    "emergency": {
+      "emergency": 12
+    },
+    "how": {
+      "how": 12
+    },
+    "name": {
+      "name": 12
+    },
+    "doctor": {
+      "doctor": 12
+    },
+    "yes": {
+      "yes": 12
+    },
+    "sorry": {
+      "sorry": 12
+    },
+    "water": {
+      "water": 12
+    }
+  },
+  "suggestedThreshold": 0.36000000000000004,
+  "mixedHandCountSigns": []
+}
