@@ -3,6 +3,7 @@ uvicorn
 websockets
 torch
 transformers
+huggingface_hub
 faster-whisper
 PyMuPDF
 python-docx

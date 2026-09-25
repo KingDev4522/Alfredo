@@ -1883,7 +1883,6 @@ button {
   border-radius: 0;
   background: rgba(5, 5, 5, 0.94);
   box-shadow:
-    inset 3px 0 0 var(--ss-accent),
     inset 0 1px 0 rgba(242, 240, 232, 0.08),
     12px 12px 0 rgba(255, 176, 0, 0.045);
   clip-path: polygon(0 0, calc(100% - var(--ss-cut)) 0, 100% var(--ss-cut), 100% 100%, var(--ss-cut) 100%, 0 calc(100% - var(--ss-cut)));
@@ -2015,7 +2014,6 @@ button {
     #050505;
   box-shadow:
     inset 0 0 0 1px rgba(5, 5, 5, 0.8),
-    inset 4px 0 0 var(--ss-cyan),
     14px 14px 0 rgba(85, 246, 229, 0.06);
   clip-path: polygon(0 0, calc(100% - 42px) 0, 100% 42px, 100% 100%, 42px 100%, 0 calc(100% - 42px));
 }
@@ -2038,7 +2036,6 @@ button {
   border-color: rgba(255, 176, 0, 0.38);
   border-radius: 0;
   background: rgba(5, 5, 5, 0.96);
-  box-shadow: inset 3px 0 0 var(--ss-accent);
   clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
 }
 
@@ -2070,13 +2067,9 @@ button {
 .ss-tool-card {
   border-radius: 0;
   background: rgba(242, 240, 232, 0.025);
-  box-shadow: inset 3px 0 0 rgba(242, 240, 232, 0.16);
   clip-path: polygon(0 0, calc(100% - 24px) 0, 100% 24px, 100% 100%, 24px 100%, 0 calc(100% - 24px));
 }
 
-.ss-tool-card--interpret {
-  box-shadow: inset 4px 0 0 var(--ss-cyan);
-}
 
 .ss-tool-card--interpret .ss-tool-card__display,
 .ss-tool-card--interpret .ss-tool-card__action,
@@ -2086,13 +2079,9 @@ button {
 
 .ss-tool-card--record {
   background: var(--ss-accent);
-  box-shadow: inset 4px 0 0 var(--ss-paper);
   clip-path: polygon(0 0, calc(100% - 24px) 0, 100% 24px, 100% 100%, 24px 100%, 0 calc(100% - 24px));
 }
 
-.ss-tool-card--review {
-  box-shadow: inset 4px 0 0 var(--ss-lime);
-}
 
 .ss-tool-card--review .ss-tool-card__display,
 .ss-tool-card--review .ss-tool-card__action {
@@ -2138,9 +2127,6 @@ button {
   background: var(--ss-accent);
 }
 
-.ss-vocabulary__group:nth-child(3) {
-  box-shadow: inset 4px 0 0 var(--ss-cyan);
-}
 
 .ss-vocabulary__group:nth-child(4) .ss-vocabulary__words,
 .ss-vocabulary__group:nth-child(5) .ss-vocabulary__words {
@@ -2160,144 +2146,15 @@ button {
   background: #050505;
 }
 
-.cyber-page {
-  position: relative;
-  isolation: isolate;
-  width: 100%;
-  min-height: calc(100vh - 64px);
-  min-height: calc(100dvh - 64px);
-  overflow: hidden;
-  background: #050505;
-  color: var(--ss-paper);
-}
-
-.cyber-page::before {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  opacity: 0.58;
+.cyber-page-grid {
   background-image:
     linear-gradient(rgba(242, 240, 232, 0.028) 1px, transparent 1px),
     linear-gradient(90deg, rgba(242, 240, 232, 0.028) 1px, transparent 1px);
   background-size: 4rem 4rem;
-  content: "";
+  opacity: 0.58;
+  -webkit-mask-image: linear-gradient(180deg, #000, transparent 72%);
   mask-image: linear-gradient(180deg, #000, transparent 72%);
 }
-
-.cyber-shell {
-  position: relative;
-  width: calc(100% - 32px);
-  max-width: 1400px;
-  margin-inline: auto;
-}
-
-.cyber-page__header {
-  display: grid;
-  gap: 2.5rem;
-  border-bottom: 1px solid var(--ss-line);
-  padding: 5.5rem 0 3rem;
-}
-
-.cyber-page__headline {
-  min-width: 0;
-}
-
-.cyber-page__eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin: 0 0 1.25rem;
-  color: var(--ss-accent);
-  font-family: "JetBrains Mono", monospace;
-  font-size: 0.6875rem;
-  font-weight: 500;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.cyber-page__eyebrow::before {
-  width: 2.5rem;
-  height: 2px;
-  background: var(--ss-accent);
-  box-shadow: 8px 0 0 var(--ss-cyan);
-  content: "";
-}
-
-.cyber-page__title {
-  max-width: 15ch;
-  margin: 0;
-  text-wrap: balance;
-  color: var(--ss-paper);
-  font-size: clamp(3rem, 7.4vw, 7.2rem);
-  font-weight: 700;
-  letter-spacing: -0.065em;
-  line-height: 0.92;
-  text-transform: uppercase;
-}
-
-.cyber-page__title strong {
-  color: var(--ss-accent);
-  font-weight: inherit;
-}
-
-.cyber-page__aside {
-  display: flex;
-  max-width: 34rem;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-end;
-  gap: 1.5rem;
-}
-
-.cyber-page__lede {
-  margin: 0;
-  color: var(--ss-muted);
-  font-size: 0.9375rem;
-  line-height: 1.75;
-  text-wrap: pretty;
-}
-
-.cyber-page__signal {
-  display: grid;
-  width: 100%;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  border-top: 1px solid var(--ss-line);
-  border-left: 1px solid var(--ss-line);
-}
-
-.cyber-page__signal > div {
-  display: flex;
-  min-height: 3.5rem;
-  align-items: center;
-  justify-content: space-between;
-  min-width: 0;
-  gap: 1rem;
-  border-right: 1px solid var(--ss-line);
-  border-bottom: 1px solid var(--ss-line);
-  padding: 0.75rem;
-  color: var(--ss-faint);
-  font-family: "JetBrains Mono", monospace;
-  font-size: 0.625rem;
-  text-transform: uppercase;
-}
-
-.cyber-page__signal strong {
-  color: var(--ss-cyan);
-  font-weight: 500;
-}
-
-.cyber-workflow {
-  position: relative;
-  width: calc(100% - 32px);
-  max-width: 1400px;
-  margin-inline: auto;
-  padding: 2rem 0 7rem;
-}
-
-.cyber-workflow > div {
-  max-width: 1400px !important;
-}
-
 .cyber-button {
   position: relative;
   display: inline-flex;
@@ -2375,7 +2232,6 @@ button {
   border: 1px solid var(--ss-line);
   border-radius: 0;
   background: rgba(242, 240, 232, 0.025);
-  box-shadow: inset 3px 0 0 var(--ss-accent);
   clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 16px 100%, 0 calc(100% - 16px));
 }
 
@@ -2398,7 +2254,6 @@ button {
 
 .cyber-field:focus {
   border-color: var(--ss-cyan);
-  box-shadow: inset 3px 0 0 var(--ss-cyan);
 }
 
 .cyber-login {
@@ -2491,7 +2346,6 @@ button {
   background: rgba(5, 5, 5, 0.92);
   padding: 1.5rem;
   box-shadow:
-    inset 4px 0 0 var(--ss-accent),
     16px 16px 0 rgba(255, 176, 0, 0.07);
   clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 22px 100%, 0 calc(100% - 22px));
 }
@@ -2547,60 +2401,12 @@ button {
   color: var(--ss-accent);
 }
 
-.cyber-record-hero {
-  display: grid;
-  gap: 2rem;
-  border-bottom: 1px solid var(--ss-line);
-  padding: 3rem 0;
-}
 
-.cyber-record-visual {
-  position: relative;
-  min-height: 22rem;
-  overflow: hidden;
-  border: 1px solid rgba(85, 246, 229, 0.34);
-  background: #050505;
-  box-shadow: inset 4px 0 0 var(--ss-cyan);
-  clip-path: polygon(0 0, calc(100% - 32px) 0, 100% 32px, 100% 100%, 32px 100%, 0 calc(100% - 32px));
-}
 
-.cyber-record-visual::after {
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(180deg, transparent 55%, rgba(5, 5, 5, 0.86)),
-    repeating-linear-gradient(0deg, transparent 0 4px, rgba(242, 240, 232, 0.03) 4px 5px);
-  content: "";
-  pointer-events: none;
-}
 
-.cyber-record-visual > div {
-  filter: grayscale(1) contrast(1.25) brightness(0.58);
-}
 
-.cyber-record-copy {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1.25rem;
-}
 
-.cyber-record-copy h1 {
-  margin: 0;
-  font-size: clamp(3rem, 6.8vw, 6.4rem);
-  font-weight: 700;
-  letter-spacing: -0.065em;
-  line-height: 0.92;
-  text-transform: uppercase;
-}
 
-.cyber-record-copy p {
-  max-width: 38rem;
-  margin: 0;
-  color: var(--ss-muted);
-  font-size: 0.9375rem;
-  line-height: 1.75;
-}
 
 .ss-mobile-menu__status {
   display: flex;
@@ -2630,12 +2436,7 @@ button {
 .cyber-media-stage {
   border-color: rgba(85, 246, 229, 0.38) !important;
   background: #050505;
-  box-shadow: inset 4px 0 0 var(--ss-cyan);
   clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 22px 100%, 0 calc(100% - 22px));
-}
-
-.cyber-media-stage {
-  box-shadow: inset 4px 0 0 var(--ss-accent);
 }
 
 .cyber-skeleton-frame {
@@ -2646,70 +2447,69 @@ button {
   aspect-ratio: 1;
   border: 1px solid rgba(85, 246, 229, 0.38);
   background: #050505;
-  box-shadow: inset 3px 0 0 var(--ss-cyan);
   clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 16px 100%, 0 calc(100% - 16px));
 }
 
-.cyber-workflow .rounded-lg,
-.cyber-workflow .rounded-md,
-.cyber-workflow .rounded-xl,
-.cyber-workflow .rounded-2xl,
-.cyber-workflow .rounded-full {
+.tool-scope .rounded-lg,
+.tool-scope .rounded-md,
+.tool-scope .rounded-xl,
+.tool-scope .rounded-2xl,
+.tool-scope .rounded-full {
   border-radius: 0 !important;
 }
 
-.cyber-workflow [class*="shadow-"] {
+.tool-scope [class*="shadow-"] {
   box-shadow: none !important;
 }
 
-.cyber-workflow [class*="border-white/"] {
+.tool-scope [class*="border-white/"] {
   border-color: var(--ss-line) !important;
 }
 
-.cyber-workflow [class*="bg-white/"] {
+.tool-scope [class*="bg-white/"] {
   background: rgba(242, 240, 232, 0.025) !important;
 }
 
-.cyber-workflow [class*="bg-black/"] {
+.tool-scope [class*="bg-black/"] {
   background: rgba(5, 5, 5, 0.9) !important;
 }
 
-.cyber-workflow .text-white,
-.cyber-workflow .text-slate-100,
-.cyber-workflow .text-slate-200 {
+.tool-scope .text-white,
+.tool-scope .text-slate-100,
+.tool-scope .text-slate-200 {
   color: var(--ss-paper) !important;
 }
 
-.cyber-workflow .text-slate-300,
-.cyber-workflow .text-slate-400 {
+.tool-scope .text-slate-300,
+.tool-scope .text-slate-400 {
   color: var(--ss-muted) !important;
 }
 
-.cyber-workflow .text-slate-500,
-.cyber-workflow .text-slate-600 {
+.tool-scope .text-slate-500,
+.tool-scope .text-slate-600 {
   color: var(--ss-faint) !important;
 }
 
-.cyber-workflow .text-amber-200,
-.cyber-workflow .text-amber-300,
-.cyber-workflow .text-amber-400 {
+.tool-scope .text-amber-200,
+.tool-scope .text-amber-300,
+.tool-scope .text-amber-400 {
   color: var(--ss-accent) !important;
 }
 
-.cyber-workflow .text-cyan-200,
-.cyber-workflow .text-cyan-300,
-.cyber-workflow .text-cyan-400 {
+.tool-scope .text-cyan-200,
+.tool-scope .text-cyan-300,
+.tool-scope .text-cyan-400 {
   color: var(--ss-cyan) !important;
 }
 
-.cyber-workflow .text-rose-200,
-.cyber-workflow .text-rose-300 {
+.tool-scope .text-rose-200,
+.tool-scope .text-rose-300 {
   color: var(--ss-paper) !important;
 }
 
-.cyber-workflow input,
-.cyber-workflow textarea,
-.cyber-workflow select {
+.tool-scope input,
+.tool-scope textarea,
+.tool-scope select {
   border: 1px solid var(--ss-line-strong) !important;
   border-radius: 0 !important;
   background: rgba(5, 5, 5, 0.9) !important;
@@ -2717,19 +2517,18 @@ button {
   outline: none;
 }
 
-.cyber-workflow input::placeholder,
-.cyber-workflow textarea::placeholder {
+.tool-scope input::placeholder,
+.tool-scope textarea::placeholder {
   color: var(--ss-faint) !important;
 }
 
-.cyber-workflow input:focus,
-.cyber-workflow textarea:focus,
-.cyber-workflow select:focus {
+.tool-scope input:focus,
+.tool-scope textarea:focus,
+.tool-scope select:focus {
   border-color: var(--ss-cyan) !important;
-  box-shadow: inset 3px 0 0 var(--ss-cyan) !important;
 }
 
-.cyber-workflow button {
+.tool-scope button {
   min-height: 2.5rem;
   border-radius: 0 !important;
   font-family: "JetBrains Mono", monospace;
@@ -2741,26 +2540,26 @@ button {
     filter 180ms var(--ss-ease);
 }
 
-.cyber-workflow button:hover:not(:disabled) {
+.tool-scope button:hover:not(:disabled) {
   filter: brightness(1.12);
   transform: translateY(-1px);
 }
 
-.cyber-workflow button:active:not(:disabled) {
+.tool-scope button:active:not(:disabled) {
   transform: translateY(1px);
 }
 
-.cyber-workflow canvas {
+.tool-scope canvas {
   border-color: rgba(85, 246, 229, 0.34) !important;
   border-radius: 0 !important;
 }
 
-.cyber-workflow video,
-.cyber-workflow canvas {
+.tool-scope video,
+.tool-scope canvas {
   filter: saturate(0.72) contrast(1.08);
 }
 
-.cyber-workflow [role="alert"] {
+.tool-scope [role="alert"] {
   border-color: var(--ss-accent);
   color: var(--ss-accent);
 }
@@ -2783,36 +2582,17 @@ button {
 }
 
 @media (min-width: 768px) {
-  .cyber-shell,
-  .cyber-workflow {
-    width: calc(100% - 64px);
+  .tool-scope {
+    width: 100%;
   }
 
   .cyber-login__shell {
     width: calc(100% - 64px);
-  }
-
-  .cyber-page__header {
-    grid-template-columns: minmax(0, 1.35fr) minmax(20rem, 0.65fr);
-    gap: 4rem;
-    padding: 7rem 0 4rem;
-  }
-
-  .cyber-page__aside {
-    border-left: 1px solid var(--ss-line);
-    padding-left: 2rem;
   }
 
   .cyber-login__shell {
     grid-template-columns: minmax(0, 1.2fr) minmax(22rem, 0.8fr);
     gap: 5rem;
-  }
-
-  .cyber-record-hero {
-    grid-template-columns: minmax(0, 1.05fr) minmax(22rem, 0.95fr);
-    align-items: stretch;
-    gap: 3rem;
-    padding: 4rem 0;
   }
 }
 
@@ -2824,22 +2604,6 @@ button {
 
   .cyber-login__brand::before {
     display: none;
-  }
-
-  .cyber-page__header {
-    padding-top: 4.5rem;
-  }
-
-  .cyber-page__title {
-    font-size: clamp(2.8rem, 14vw, 4.6rem);
-  }
-
-  .cyber-page__signal {
-    grid-template-columns: 1fr;
-  }
-
-  .cyber-record-visual {
-    min-height: 18rem;
   }
 }
 
@@ -2879,50 +2643,326 @@ button {
 
 /* Centered studio hero headers - interpret / translate / record / review.
  * Placed last so it wins over the two-column desktop grid above. */
-.cyber-page__header {
-  grid-template-columns: 1fr;
-  justify-items: center;
-  text-align: center;
-}
 
-.cyber-page__headline {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
 
-.cyber-page__eyebrow {
+.ss-eyebrow {
   justify-content: center;
 }
 
-.cyber-page__title {
-  margin-inline: auto;
+
+
+
+
+
+
+/*
+ * Tool theming scope.
+ *
+ * This is NOT page layout. It is a styling scope: ~40 descendant rules here
+ * normalise the tool components, which are written with their own Tailwind
+ * utilities (text-slate-300, rounded-2xl, bg-white/5 and so on), into the
+ * product palette. The tools do not carry these classes themselves, so removing
+ * this scope silently restyles every button, input and label in the studio.
+ *
+ * Renamed from .cyber-workflow, which read like a page frame but never was one.
+ * Layout lives in StudioPage.jsx.
+ */
+.tool-scope {
+  position: relative;
 }
 
-.cyber-page__aside {
+/* ===================================================================
+   INTERPRETER REFERENCE DESIGN
+   -------------------------------------------------------------------
+   A warm dark system, deliberately not pure black: the base is a deep
+   warm charcoal so surfaces layer visibly instead of collapsing into a
+   flat void.
+
+   Colour is used, not stripped out. Two accents, with fixed jobs so they
+   never drift into each other:
+
+     yellow  --ref-accent  the secondary brand colour. Tiles, chips,
+                             outlines, the eyebrow, secondary actions.
+     green   --ref-live    live/active state only. Never decoration.
+
+   Neutrals carry everything else. The earlier cyber system used
+   accent-coloured borders and inset stripes; that vocabulary is gone.
+   Nothing in this block is page layout, layout is Tailwind on the
+   elements.
+   =================================================================== */
+
+.ref-page {
+  --ref-bg: #100f0d;
+  --ref-surface: #1a1815;
+  --ref-surface-2: #24211c;
+  --ref-surface-3: #2e2a23;
+  --ref-line: rgba(255, 214, 120, 0.11);
+  --ref-line-strong: rgba(255, 214, 120, 0.22);
+  --ref-text: #ffffff;
+  --ref-muted: #bdb6a9;
+  /* Was #7d766a, which measured 3.94:1 on the panel and 3.57:1 in the field.
+     That passes large text only, and it was carrying 10.5px section labels
+     and 13.5px empty-state copy, so it failed body text. #9b948a measures
+     5.90:1 and 5.34:1, clearing 4.5:1 on both surfaces. */
+  --ref-faint: #9b948a;
+  --ref-accent: #ffc53d;
+  --ref-accent-soft: rgba(255, 197, 61, 0.12);
+  --ref-accent-line: rgba(255, 197, 61, 0.36);
+  --ref-live: #34d399;
+  --ref-live-soft: rgba(52, 211, 153, 0.12);
+  --ref-live-line: rgba(52, 211, 153, 0.36);
+  --ref-radius: 16px;
+  --ref-radius-sm: 12px;
+  --ref-radius-xs: 10px;
+}
+
+/* Page background. Pure black is avoided, per the off-black rule. */
+.ref-page {
+  position: relative;
+  isolation: isolate;
+  background: var(--ref-bg);
+  color: var(--ref-text);
+}
+
+
+/* Panel: the single surface primitive. Replaces .cyber-panel here. */
+.ref-panel {
+  border: 1px solid var(--ref-line);
+  border-radius: var(--ref-radius);
+  background: var(--ref-surface);
+}
+
+.ref-panel--flat {
+  background: transparent;
+  border-color: transparent;
+}
+
+/* Section label inside a panel: icon + tracked caps. */
+.ref-label {
+  display: inline-flex;
   align-items: center;
-  max-width: 40rem;
-  border-left: 0;
-  padding-left: 0;
-  text-align: center;
+  gap: 0.5rem;
+  color: var(--ref-faint);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
 }
 
-.cyber-page__lede {
-  text-align: center;
+/* Tinted rounded square that holds an icon. Yellow: the secondary colour. */
+.ref-icon {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: 0 0 auto;
+  border-radius: var(--ref-radius-xs);
+  background: var(--ref-accent-soft);
+  color: var(--ref-accent);
 }
 
-.cyber-record-hero {
-  grid-template-columns: 1fr;
-  justify-items: center;
-  text-align: center;
+/* Green variant, for live state only. */
+.ref-icon--live {
+  background: var(--ref-live-soft);
+  color: var(--ref-live);
 }
 
-.cyber-record-copy {
+/* Eyebrow pill, replaces the bare uppercase caption. */
+.ref-pill {
+  display: inline-flex;
   align-items: center;
-  text-align: center;
+  gap: 0.55rem;
+  border: 1px solid var(--ref-accent-line);
+  border-radius: 999px;
+  background: var(--ref-accent-soft);
+  padding: 0.5rem 0.95rem;
+  color: var(--ref-accent);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
 }
 
-.cyber-record-copy p {
-  margin-inline: auto;
-  text-align: center;
+.ref-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: var(--ref-accent);
+}
+
+.ref-dot--live {
+  background: var(--ref-live);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.16);
+}
+
+
+/* Buttons. One radius for all of them, per shape consistency. */
+.ref-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  border: 1px solid var(--ref-line);
+  border-radius: var(--ref-radius-sm);
+  background: var(--ref-surface-2);
+  padding: 0.7rem 1.15rem;
+  color: var(--ref-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.1;
+  cursor: pointer;
+  transition: background 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s,
+    transform 0.1s;
+}
+
+.ref-btn:hover:not(:disabled) {
+  background: var(--ref-surface-3);
+  border-color: var(--ref-line-strong);
+}
+
+.ref-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.ref-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.ref-btn--primary {
+  border-color: transparent;
+  background: #f4f4f5;
+  color: #0b0b0d;
+}
+
+.ref-btn--primary:hover:not(:disabled) {
+  background: #ffffff;
+  border-color: transparent;
+}
+
+.ref-btn--live {
+  border-color: var(--ref-live-line);
+  background: var(--ref-live-soft);
+  color: var(--ref-live);
+}
+
+.ref-btn--live:hover:not(:disabled) {
+  background: rgba(52, 211, 153, 0.18);
+  border-color: rgba(52, 211, 153, 0.5);
+}
+
+/* Yellow outline: the secondary action. Sits beside the white primary
+   without competing with it, and without reading as a live state. */
+.ref-btn--accent {
+  border-color: var(--ref-accent-line);
+  background: var(--ref-accent-soft);
+  color: var(--ref-accent);
+}
+
+.ref-btn--accent:hover:not(:disabled) {
+  background: rgba(255, 197, 61, 0.2);
+  border-color: rgba(255, 197, 61, 0.55);
+}
+
+/* Chip for a recognised sign in the sentence. */
+.ref-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--ref-accent-line);
+  border-radius: 999px;
+  background: var(--ref-accent-soft);
+  padding: 0.35rem 0.9rem;
+  color: var(--ref-accent);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+
+/* Two-line button, as used by Auto sentences and Clear. */
+.ref-btn__stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  text-align: left;
+}
+
+.ref-btn__sub {
+  color: var(--ref-faint);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+/* Round icon button overlaid on the camera. */
+.ref-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid var(--ref-line);
+  border-radius: 999px;
+  background: rgba(16, 15, 13, 0.78);
+  backdrop-filter: blur(8px);
+  color: var(--ref-text);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, transform 0.1s;
+}
+
+
+.ref-icon-btn:hover {
+  background: rgba(8, 8, 10, 0.9);
+  border-color: var(--ref-line-strong);
+}
+
+.ref-icon-btn:active {
+  transform: translateY(1px);
+}
+
+/* Value field, the bordered "Empty" box. */
+.ref-field {
+  border: 1px solid var(--ref-line);
+  border-radius: var(--ref-radius-sm);
+  background: var(--ref-surface-2);
+  padding: 0.7rem 0.9rem;
+  color: var(--ref-muted);
+  font-size: 0.875rem;
+}
+
+/* Headline: line one white, line two muted. A single treatment, used once. */
+.ref-title {
+  font-family: "Inter", "Inter Tight", system-ui, -apple-system, sans-serif;
+  font-size: clamp(2.5rem, 5.2vw, 4.4rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.02;
+}
+
+.ref-title__dim {
+  color: var(--ref-accent);
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .ref-btn,
+  .ref-icon-btn {
+    transition: none;
+  }
+}
+
+/* Waveform bars in the listening state. Animating scaleY rather than height so
+   the motion stays on the compositor. Collapsed under reduced motion. */
+@keyframes ref-pulse {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [class*="ref-pulse"],
+  .ref-page span[style*="ref-pulse"] {
+    animation: none !important;
+    transform: scaleY(0.7);
+  }
 }

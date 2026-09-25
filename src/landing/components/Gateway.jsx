@@ -158,16 +158,6 @@ export default function Gateway() {
         </p>
         <ReviewsRow reviews={REVIEWS_A} duration="58s" />
         <ReviewsRow reviews={REVIEWS_B} reverse duration="66s" />
-
-        <div className="flex flex-col items-center gap-2 pt-10 text-neutral-500">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path
-              d="M7 11.5V6a1.5 1.5 0 0 1 3 0v5m0-4.5V4a1.5 1.5 0 0 1 3 0v7m0-4.5a1.5 1.5 0 0 1 3 0V9m0 0a1.5 1.5 0 0 1 3 0v4.5c0 4-2.5 6.5-6.5 6.5S9 18 7.5 15.5L5.6 12a1.6 1.6 0 0 1 2.7-1.6L9 11.5"
-              stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"
-            />
-          </svg>
-          <span className="font-mono-tech text-[10px] uppercase tracking-[0.22em]">SignSpeak: on-device ISL interpretation</span>
-        </div>
       </div>
     </section>
   )

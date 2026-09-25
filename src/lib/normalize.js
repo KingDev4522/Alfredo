@@ -19,8 +19,30 @@
  * how close they are to the camera or where they stand in the frame,
  * while perfectly preserving the true kinematic trajectories of the arms
  * AND the 3D finger articulation of the hands.
+ *
+ * ASPECT RATIO (added after a vertical over-extension bug):
+ * MediaPipe normalises x by the image WIDTH and y by the image HEIGHT. The
+ * two therefore do not share a scale. For a physical distance d,
+ *
+ *     dx = d / W_visible        dy = d / H_visible
+ *
+ * so dy = dx * (W_visible / H_visible). The camera is 640x480, a factor of
+ * 1.3333, which means every vertical measurement is 33 percent larger than
+ * the equivalent horizontal one.
+ *
+ * The shoulder width is horizontal and near zero in y, so dividing vertical
+ * displacements by it inflated every raised arm by a third. Signs signed at
+ * face or chest height came out above the crown of the head. `aspect` is
+ * width/height and divides the y term to put both axes into the same
+ * shoulder-width unit. Pass the real frame size; the default matches the
+ * camera constraints in lib/camera.js.
  */
-export function normalizeSequence(rawFrames) {
+export const DEFAULT_FRAME_ASPECT = 640 / 480;
+
+export function normalizeSequence(rawFrames, frameAspect = DEFAULT_FRAME_ASPECT) {
+  const aspect = Number.isFinite(frameAspect) && frameAspect > 0.01
+    ? frameAspect
+    : DEFAULT_FRAME_ASPECT;
   // Only use frames where the body was successfully detected to compute ref
   const validFrames = rawFrames.filter(
     (f) => f.body && f.body.left_shoulder && f.body.right_shoulder
@@ -38,7 +60,7 @@ export function normalizeSequence(rawFrames) {
 
   // 2. Calculate the reference scale (average shoulder width across recording)
   const widths = validFrames.map((f) =>
-    distanceBetween(f.body.left_shoulder, f.body.right_shoulder)
+    distanceBetween(f.body.left_shoulder, f.body.right_shoulder, aspect)
   );
   const refScale = safeScale(average(widths));
 
@@ -48,7 +70,7 @@ export function normalizeSequence(rawFrames) {
     if (frame.body) {
       for (const [joint, point] of Object.entries(frame.body)) {
         if (point) {
-          normalizedBody[joint] = applyNormalization(point, refPoint, refScale);
+          normalizedBody[joint] = applyNormalization(point, refPoint, refScale, aspect);
         } else {
           normalizedBody[joint] = null;
         }
@@ -57,8 +79,8 @@ export function normalizeSequence(rawFrames) {
 
     return {
       body: normalizedBody,
-      left_hand: frame.left_hand ? frame.left_hand.map((p) => applyHandNormalization(p, refPoint, refScale)) : null,
-      right_hand: frame.right_hand ? frame.right_hand.map((p) => applyHandNormalization(p, refPoint, refScale)) : null,
+      left_hand: frame.left_hand ? frame.left_hand.map((p) => applyHandNormalization(p, refPoint, refScale, aspect)) : null,
+      right_hand: frame.right_hand ? frame.right_hand.map((p) => applyHandNormalization(p, refPoint, refScale, aspect)) : null,
     };
   });
   
@@ -128,11 +150,11 @@ function safeScale(scale) {
   return scale > 0.0001 ? scale : 1;
 }
 
-function applyNormalization(point, referencePoint, scale) {
+function applyNormalization(point, referencePoint, scale, aspect) {
   return {
     x: round((point.x - referencePoint.x) / scale),
-    y: round((point.y - referencePoint.y) / scale),
-    z: round((point.z - referencePoint.z) / scale), // Restored true volumetric depth relative to chest
+    y: round((point.y - referencePoint.y) / (scale * aspect)),
+    z: round((point.z - referencePoint.z) / scale),
   };
 }
 
@@ -143,18 +165,19 @@ function applyNormalization(point, referencePoint, scale) {
  * we MUST also divide Z by the same scale. Failing to scale Z uniformly
  * squashes the 3D direction vectors and breaks the finger articulation angles.
  */
-function applyHandNormalization(point, referencePoint, scale) {
+function applyHandNormalization(point, referencePoint, scale, aspect) {
   return {
     x: round((point.x - referencePoint.x) / scale),
-    y: round((point.y - referencePoint.y) / scale),
-    z: round(point.z / scale), // Uniformly scaled to preserve 3D angle aspect ratios
+    y: round((point.y - referencePoint.y) / (scale * aspect)),
+    z: round(point.z / scale),
   };
 }
 
-function distanceBetween(a, b) {
-  // Use only X and Y for scale calculation
+function distanceBetween(a, b, aspect = DEFAULT_FRAME_ASPECT) {
+  // Horizontal shoulder width, in IMAGE-WIDTH units. The y term is folded in
+  // with the aspect correction below, see the header note on aspect.
   return Math.sqrt(
-    Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2)
+    Math.pow(a.x - b.x, 2) + Math.pow((a.y - b.y) / aspect, 2)
   );
 }
 

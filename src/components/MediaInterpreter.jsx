@@ -1,10 +1,86 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Canvas } from '@react-three/fiber';
-import { OrbitControls } from '@react-three/drei';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
+import { Grid, OrbitControls } from '@react-three/drei';
 import { useSignStream } from '../hooks/useSignStream';
 import { API_BASE_URL } from '../lib/supabaseClient';
 import { Avatar } from './Avatar';
 import { useAuth } from '../hooks/useAuth';
+
+/*
+ * Framing for the avatar stage.
+ *
+ * The camera used to sit at a hardcoded [0, 2.65, 3.5] with a fixed target, so
+ * the model was framed for one container shape and overflowed any other. This
+ * derives the distance from the model's own bounds and the live aspect ratio,
+ * so the same framing holds in the 320px mobile box and the 58vh desktop panel.
+ *
+ * The box is the upper body plus headroom, because a sign can put the hands
+ * above the crown: measured on this GLB the head sits at y=3.07 and the crown
+ * at y=3.40, and the A and B takes drive the wrists to y=3.65. Framing only to
+ * the head would clip them, so FRAME_TOP leaves room for a raised arm.
+ */
+const FRAME_BOTTOM = 1.45;   // mid-torso, below the waist
+const FRAME_TOP = 3.80;      // above the crown, clears a raised hand
+const FRAME_HALF_WIDTH = 0.85; // clears the arms at the elbow
+const FRAME_MARGIN = 1.14;   // breathing room, as a multiplier
+const MIN_DISTANCE = 1.6;
+const MAX_DISTANCE = 9;
+
+/* User-facing size multiplier on the fitted camera distance. Below 1 pulls the
+   camera in and the avatar appears larger, above 1 pushes it back. The floor is
+   0.9 because the fit is computed for a 2.35 m box, and the real content
+   spans 1.45 to 3.70 (2.25 m, the top being the highest wrist in the A and B
+   takes): below about 0.9 a raised hand would be cut off at the top edge.
+   Verified by scripts/verify_stage_framing.mjs, which checks seven container
+   shapes from 300x600 to 1600x520. */
+const MIN_ZOOM = 0.9;
+const MAX_ZOOM = 1.8;
+const ZOOM_STEP = 0.15;
+
+const clampZoom = (z) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
+
+/*
+ * Positions the camera and keeps the OrbitControls target on the model. `zoom`
+ * is a user multiplier on the fitted distance, so "bigger" and "smaller" keep
+ * the framing centred instead of drifting off the model.
+ */
+function FitModel({ zoom, targetRef }) {
+  const camera = useThree((s) => s.camera);
+  const size = useThree((s) => s.size);
+  const invalidate = useThree((s) => s.invalidate);
+
+  const fit = useCallback(() => {
+    const aspect = size.width / Math.max(1, size.height);
+    const fovRad = ((camera.fov || 40) * Math.PI) / 180;
+
+    const boxHeight = (FRAME_TOP - FRAME_BOTTOM) * FRAME_MARGIN;
+    const boxWidth = FRAME_HALF_WIDTH * 2 * FRAME_MARGIN;
+
+    // vertical fit, and horizontal fit when the container is narrow
+    const distForHeight = boxHeight / (2 * Math.tan(fovRad / 2));
+    const distForWidth = boxWidth / (2 * Math.tan(fovRad / 2) * aspect);
+    const dist = Math.min(MAX_DISTANCE, Math.max(MIN_DISTANCE, Math.max(distForHeight, distForWidth) * zoom));
+
+    const centreY = (FRAME_TOP + FRAME_BOTTOM) / 2;
+    camera.position.set(0, centreY, dist);
+    camera.near = Math.max(0.05, dist / 100);
+    camera.far = dist * 20;
+    camera.updateProjectionMatrix();
+    camera.lookAt(0, centreY, 0);
+
+    if (targetRef.current) {
+      targetRef.current.target.set(0, centreY, 0);
+      targetRef.current.update();
+    }
+    invalidate();
+  }, [camera, size.width, size.height, zoom, invalidate, targetRef]);
+
+  useEffect(() => {
+    fit();
+  }, [fit]);
+
+  return null;
+}
 
 export function MediaInterpreter() {
   const { isAdmin } = useAuth();
@@ -18,10 +94,12 @@ export function MediaInterpreter() {
   const [jobContext, setJobContext] = useState(null);
   
   const [activeSign, setActiveSign] = useState(null);
+  // Avatar on-screen size, as a multiplier on the fitted camera distance.
+  const [zoom, setZoom] = useState(1);
+  const controlsRef = useRef(null);
   const [sentence, setSentence] = useState([]);
   
   const [isListening, setIsListening] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
   
   // Global Toast System
   const [toast, setToast] = useState(null); // { message: string, type: 'error' | 'success' }
@@ -223,9 +301,9 @@ export function MediaInterpreter() {
     }
   };
 
-  const handleFileProcess = async (droppedFile = null) => {
+  const handleFileProcess = async () => {
     if (isBusy) return;
-    const fileToProcess = droppedFile || selectedFile;
+    const fileToProcess = selectedFile;
     if (!fileToProcess) return;
 
     setProcessState('uploading');
@@ -282,39 +360,18 @@ export function MediaInterpreter() {
     e.target.value = null; // Reset input
   };
 
-  // Drag and drop handlers
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      const validExts = ['pdf', 'docx', 'txt', 'mp4', 'mkv', 'wav', 'mp3'];
-      const ext = file.name.split('.').pop().toLowerCase();
-      
-      if (validExts.includes(ext)) {
-        setSelectedFile(file);
-        handleFileProcess(file);
-      } else {
-        setToast({ message: `Invalid file type: .${ext}`, type: 'error' });
-      }
-    }
-  };
+  // There is no drag-and-drop target on the avatar stage. Dropping a file onto
+  // a 3D viewport is a poor affordance: it is invisible until you happen to
+  // drag over the canvas, the stage is also the orbit/zoom surface, and the
+  // only feedback is a full-bleed overlay that hides the avatar. Files are
+  // chosen through the labelled "Media or document input" control instead,
+  // which is visible, keyboard reachable, and announces the accepted types.
 
 
 
   return (
-    <div className="cyber-media-grid relative grid w-full max-w-6xl grid-cols-1 items-start gap-6 lg:grid-cols-[1.05fr_0.95fr]">
+      <div className="ref-page relative grid w-full grid-cols-1 items-start gap-5 lg:grid-cols-[1.12fr_0.88fr]">
+
 
       {/* Global Toast Notification */}
       {toast && (
@@ -333,38 +390,57 @@ export function MediaInterpreter() {
 
       {/* Visual column: 3D avatar stage */}
       <div className="flex flex-col gap-4 lg:sticky lg:top-24 min-w-0">
-      {/* Drag & Drop Canvas Wrapper */}
+      {/* Avatar stage. Not a drop target: see the note by the file input. */}
       <div
-        className="cyber-media-stage relative min-h-[320px] w-full overflow-hidden border border-white/10 bg-[#050505] lg:h-[58vh] lg:aspect-auto lg:min-h-0"
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
+        className="ref-panel relative min-h-[340px] w-full overflow-hidden bg-black sm:min-h-[420px] lg:h-[62vh] lg:aspect-auto lg:min-h-0"
       >
-        {isDragging && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center border-2 border-dashed border-[#55F6E5] bg-black/80 p-6 text-center">
-            <span className="font-mono text-sm font-semibold uppercase tracking-[0.16em] text-[#55F6E5]">
-              Drop file to process
-            </span>
-          </div>
-        )}
 
         <Canvas
-          // 1. CAMERA POSITION: [x, y, z]
-          // Increase the middle number (y) to move the camera higher up.
-          // Decrease the last number (z) to zoom in closer.
-          camera={{ position: [0, 2.5, 3.8], fov: 40 }}
+          camera={{ position: [0, 2.6, 3.5], fov: 40 }}
           dpr={Math.min(window.devicePixelRatio, 1.5)}
           gl={{ powerPreference: "high-performance", antialias: true, alpha: false }}
         >
-          {/* BACKGROUND COLOR: change the hex code below to adjust the gray */}
-          <color attach="background" args={['#050505']} />
+          <color attach="background" args={['#07080a']} />
           <ambientLight intensity={0.5} />
           <directionalLight position={[5, 5, 5]} intensity={1.5} />
 
-          {/* 2. CAMERA TARGET: [x, y, z] */}
-          {/* This is what the camera is "looking at". Increase the middle number (y) to look higher up at the chest/head. */}
-          {/* Phase 4C: OrbitControls locked so visual framing perfectly matches backend collision math */}
-          <OrbitControls target={[0, 2.5, 0]} enableZoom={false} enablePan={false} />
+          {/*
+            Gridded backdrop. A flat black wall gives no depth cue at all, so
+            the silhouette reads as a cut-out and there is no way to tell a hand
+            held in front of the chest from one held behind the back. A receding
+            grid gives the floor plane and a sense of near/far, and the cell
+            lines make the model's outline easy to read against it.
+            cellSize 0.25 m against a 0.5936 m shoulder span, so the squares are
+            a known reference for judging how big the avatar is on screen.
+          */}
+          <Grid
+            position={[0, 0, 0]}
+            args={[40, 40]}
+            cellSize={0.25}
+            cellThickness={0.6}
+            cellColor="#2a3038"
+            sectionSize={1.25}
+            sectionThickness={1.1}
+            sectionColor="#3d4652"
+            fadeDistance={26}
+            fadeStrength={1.6}
+            followCamera={false}
+            infiniteGrid
+          />
+
+          {/* Upper-body view: waist-up through raised hands, framed to the model */}
+          <OrbitControls
+            ref={controlsRef}
+            makeDefault
+            enablePan={false}
+            enableZoom={false}
+            minDistance={MIN_DISTANCE}
+            maxDistance={MAX_DISTANCE}
+            enableDamping
+            dampingFactor={0.08}
+            target={[0, 2.6, 0]}
+          />
+          <FitModel zoom={zoom} targetRef={controlsRef} />
 
           <React.Suspense fallback={null}>
             <Avatar
@@ -373,6 +449,56 @@ export function MediaInterpreter() {
             />
           </React.Suspense>
         </Canvas>
+
+        {/*
+          Size control. The canvas previously had enableZoom={false} and no UI
+          at all, so the on-screen size of the avatar could not be changed by
+          anyone. zoom multiplies the fitted camera distance, so the model stays
+          centred and only its apparent size changes.
+        */}
+        <div className="absolute right-4 top-4 z-20 flex flex-col items-end gap-2">
+          <div className="flex items-center gap-1 border border-white/15 bg-black/80 p-1 backdrop-blur-sm">
+            <button
+              type="button"
+              onClick={() => setZoom((z) => clampZoom(z - ZOOM_STEP))}
+              disabled={zoom <= MIN_ZOOM}
+              aria-label="Make the avatar smaller"
+              className="h-7 w-7 border border-white/15 text-sm leading-none text-neutral-300 transition-colors hover:border-[#55F6E5] hover:text-[#55F6E5] disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              &minus;
+            </button>
+            <label className="sr-only" htmlFor="avatar-zoom">Avatar size</label>
+            <input
+              id="avatar-zoom"
+              type="range"
+              min={MIN_ZOOM}
+              max={MAX_ZOOM}
+              step={0.01}
+              value={zoom}
+              onChange={(e) => setZoom(Number(e.target.value))}
+              className="h-1 w-28 cursor-pointer appearance-none bg-white/15 accent-[#55F6E5]"
+            />
+            <button
+              type="button"
+              onClick={() => setZoom((z) => clampZoom(z + ZOOM_STEP))}
+              disabled={zoom >= MAX_ZOOM}
+              aria-label="Make the avatar larger"
+              className="h-7 w-7 border border-white/15 text-sm leading-none text-neutral-300 transition-colors hover:border-[#55F6E5] hover:text-[#55F6E5] disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              +
+            </button>
+          </div>
+          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-neutral-500">
+            size {Math.round(zoom * 100)}%
+          </span>
+          <button
+            type="button"
+            onClick={() => setZoom(1)}
+            className="border border-white/15 bg-black/80 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-neutral-400 backdrop-blur-sm transition-colors hover:border-[#55F6E5] hover:text-[#55F6E5]"
+          >
+            Reset
+          </button>
+        </div>
 
         {activeSign && activeSign.word && (
           <div className="absolute bottom-6 left-6 pointer-events-none z-10">
@@ -395,14 +521,14 @@ export function MediaInterpreter() {
       <div className="flex flex-col gap-4 min-w-0">
       {/* Original Input Context Panel */}
       {jobContext && (
-        <div className="cyber-panel flex min-h-[60px] w-full flex-col justify-center p-4">
+        <div className="ref-panel flex min-h-[68px] w-full flex-col justify-center p-5">
           <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Original Input Context</h3>
           <p className="text-slate-200 text-lg leading-snug">{jobContext}</p>
         </div>
       )}
 
       {/* Sentence Accumulator Panel */}
-      <div className="cyber-panel min-h-[80px] w-full p-6">
+      <div className="ref-panel min-h-[80px] w-full p-5">
         <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Live Transcript</h3>
         <div className="flex flex-wrap gap-x-2 gap-y-3">
           {sentence.map((item, index) => {
@@ -428,7 +554,7 @@ export function MediaInterpreter() {
       </div>
 
       {/* UX State Machine & Pipeline Progress */}
-      <div className="cyber-panel flex flex-col gap-3 p-4">
+      <div className="ref-panel flex flex-col gap-3 p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
           <div className="flex-1">
             <div className="flex justify-between text-xs text-slate-400 mb-1">
@@ -456,7 +582,7 @@ export function MediaInterpreter() {
         </div>
         
         {/* State Machine Status Bar */}
-        <div className="grid w-full grid-cols-2 gap-2 border-t border-white/10 pt-3 sm:grid-cols-5">
+        <div className="grid w-full grid-cols-2 gap-2 border-t border-[var(--ref-line)] pt-3 sm:grid-cols-5">
           {['idle', 'uploading', 'transcribing', 'translating', 'streaming'].map((state) => (
              <div key={state} className={`flex items-center gap-2 text-xs font-bold uppercase tracking-wider ${processState === state ? 'text-[#55F6E5] drop-shadow-[0_0_5px_rgba(85,246,229,0.5)]' : 'text-slate-600'}`}>
                 <div className={`w-2 h-2 rounded-full ${processState === state ? 'bg-[#55F6E5] shadow-[0_0_8px_#55F6E5]' : 'bg-slate-700'}`} />
@@ -467,12 +593,12 @@ export function MediaInterpreter() {
       </div>
 
       {/* Controls */}
-      <div className="cyber-panel flex flex-col gap-4 p-4">
+      <div className="ref-panel flex flex-col gap-4 p-5">
         
         {isAdmin && (
           <div className="flex flex-col justify-between gap-3 border border-[#FFB000]/35 bg-black p-3 sm:flex-row sm:items-center">
             <div>
-              <span className="cyber-page__eyebrow !mb-1">Admin tool</span>
+              <span className="ss-eyebrow !mb-1">Admin tool</span>
               <span className="text-sm font-semibold text-slate-300">Master dictionary setup</span>
             </div>
             <div className="flex items-center gap-3">
@@ -507,12 +633,12 @@ export function MediaInterpreter() {
               value={youtubeUrl}
               onChange={(event) => setYoutubeUrl(event.target.value)}
               disabled={isBusy}
-              className="cyber-field"
+              className="ref-field"
             />
             <button
               type="submit"
               disabled={isBusy || !youtubeUrl}
-              className="cyber-button cyber-button--primary"
+              className="ref-btn ref-btn--primary"
             >
               Translate
               <span aria-hidden="true">→</span>
@@ -534,14 +660,14 @@ export function MediaInterpreter() {
                 if (event.ctrlKey && event.key === "Enter") handleTextSubmit(event);
               }}
               disabled={isBusy}
-              className="cyber-field min-h-28 resize-y"
+              className="ref-field min-h-28 resize-y"
             />
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-1">
               <button
                 type="button"
                 onClick={toggleListening}
                 disabled={isBusy}
-                className={`cyber-button ${isListening ? "cyber-button--primary animate-pulse" : ""}`}
+                className={`ref-btn ${isListening ? "ref-btn--live" : ""}`}
                 title="Voice dictation"
                 aria-pressed={isListening}
               >
@@ -550,7 +676,7 @@ export function MediaInterpreter() {
               <button
                 type="submit"
                 disabled={isBusy || !textContent}
-                className="cyber-button cyber-button--primary"
+                className="ref-btn ref-btn--primary"
               >
                 Translate
               </button>
@@ -569,13 +695,13 @@ export function MediaInterpreter() {
               accept=".pdf,.docx,.txt,.mp4,.mkv,.wav,.mp3"
               onChange={(event) => setSelectedFile(event.target.files[0])}
               disabled={isBusy}
-              className="cyber-field file:mr-3 file:border-0 file:bg-[#FFB000] file:px-3 file:py-1.5 file:text-[#050505]"
+              className="ref-field file:mr-3 file:border-0 file:bg-[#FFB000] file:px-3 file:py-1.5 file:text-[#050505]"
             />
             <button
               type="button"
               onClick={() => handleFileProcess()}
               disabled={isBusy || !selectedFile}
-              className="cyber-button cyber-button--primary"
+              className="ref-btn ref-btn--primary"
             >
               Process
               <span aria-hidden="true">→</span>

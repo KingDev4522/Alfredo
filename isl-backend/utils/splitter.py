@@ -2,6 +2,44 @@ import functools
 from typing import Any
 from transformers import AutoTokenizer, T5ForConditionalGeneration
 
+T5_MODEL_ID = "google/flan-t5-base"
+
+
+class _WordTokenizer:
+    """Offline fallback for *splitting only*: word counts approximate tokens.
+
+    Used when the FLAN-T5 tokenizer is not cached locally and cannot be
+    downloaded. Real translation (``t5_translate``) still needs the model;
+    this shim just keeps document/text chunking working offline.
+    """
+
+    @staticmethod
+    def encode(text, add_special_tokens=False):
+        return text.split()
+
+    @staticmethod
+    def decode(token_ids, **kwargs):
+        return " ".join(str(t) for t in token_ids)
+
+
+_split_tokenizer_logged = False
+
+
+def get_split_tokenizer() -> Any:
+    """Tokenizer for chunking: real T5 one if cached, else word-based shim."""
+    global _split_tokenizer_logged
+    try:
+        return AutoTokenizer.from_pretrained(T5_MODEL_ID, local_files_only=True)
+    except Exception:
+        if not _split_tokenizer_logged:
+            print(
+                "[splitter] FLAN-T5 tokenizer not cached; using word-based "
+                "length estimates for chunking.",
+                flush=True,
+            )
+            _split_tokenizer_logged = True
+        return _WordTokenizer()
+
 @functools.lru_cache(maxsize=1)
 def get_t5_model_and_tokenizer() -> tuple:
     import torch
@@ -52,7 +90,7 @@ def recursive_token_splitter(text: str, max_tokens: int = 400, overlap: int = 50
     return _split_with_overlap(text, max_tokens, overlap, separators)
 
 def _split_with_overlap(text: str, max_tokens: int, overlap: int, separators: list[str]) -> list[str]:
-    tokenizer = get_tokenizer()
+    tokenizer = get_split_tokenizer()
     tokens = tokenizer.encode(text, add_special_tokens=False)
     if len(tokens) <= max_tokens:
         return [text.strip()] if text.strip() else []

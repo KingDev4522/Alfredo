@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from utils.splitter import recursive_token_splitter
+from utils.model_registry import ModelUnavailableError, get_whisper_model
 from utils.job_manager import init_job, set_total_chunks, push_text_chunk
 
 router = APIRouter()
@@ -13,9 +14,17 @@ router = APIRouter()
 class MediaRequest(BaseModel):
     url: str
 
-async def process_media_background(job_id: str, url: str, whisper_model):
+async def process_media_background(job_id: str, url: str, app):
     temp_audio_path = None
     try:
+        # Resolved here (not at request time): loads the cached model on first
+        # use, or raises ModelUnavailableError immediately if it is missing.
+        try:
+            whisper_model = get_whisper_model(app)
+        except ModelUnavailableError as e:
+            print(f"Error in background media task {job_id}: {e}")
+            return
+
         # Create a temp file path for the audio
         fd, temp_audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(fd) # Close file descriptor; yt-dlp will write to this path
@@ -78,6 +87,6 @@ async def process_youtube(req: MediaRequest, background_tasks: BackgroundTasks, 
 
     job_id = str(uuid.uuid4())
     await init_job(job_id)
-    background_tasks.add_task(process_media_background, job_id, url, request.app.state.whisper_model)
+    background_tasks.add_task(process_media_background, job_id, url, request.app)
 
     return {"job_id": job_id, "status": "processing"}

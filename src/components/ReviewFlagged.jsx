@@ -48,16 +48,25 @@ export function ReviewFlagged() {
       return;
     }
 
+    // Non-admins are locked to My Space: they never list Shared Main takes and
+    // can never delete them. The scope toggle is admin-only UI; clamp here too
+    // so a crafted state cannot widen the query.
+    const effectiveScope = isAdmin ? scope : "mine";
+    // Storage tags personal rows source:"user" and shared rows source:"main"
+    // (see recordingStorage.getAllRecordings); legacy file rows have no tag.
+    const wantedSource = effectiveScope === "main" ? "main" : "user";
+
     setIsLoading(true);
     try {
       const matchingIds = new Set(matchingWords.map((word) => word.id));
       const allRecordings = await getAllRecordings();
       const scopedRecordings = allRecordings.filter(
         (recording) =>
-          matchingIds.has(recording.signId) && (!recording.source || recording.source === scope),
+          matchingIds.has(recording.signId) &&
+          (!recording.source || recording.source === wantedSource),
       );
       setRecordings(scopedRecordings);
-      const scopeLabel = scope === "main" ? "Shared Main" : "My Space";
+      const scopeLabel = effectiveScope === "main" ? "Shared Main" : "My Space";
       setFeedback(
         scopedRecordings.length === 0
           ? `${scopeLabel} has no recordings for ${matchingWords
@@ -74,6 +83,12 @@ export function ReviewFlagged() {
   }
 
   async function handleDelete(recording) {
+    // Belt-and-braces: a non-admin must never delete a Shared Main take, even
+    // if a stale row somehow renders. Storage + RLS enforce this too.
+    if (!isAdmin && recording.source === "main") {
+      setFeedback("Shared Main recordings can only be removed by an admin.", "error");
+      return;
+    }
     const sourceLabel =
       recording.source === "main"
         ? "Shared Main"
@@ -107,7 +122,6 @@ export function ReviewFlagged() {
       <section className="cyber-panel grid gap-4 p-4 sm:p-5" aria-label="Recording search">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <span className="cyber-page__eyebrow !mb-1">Scope // {scope === "main" ? "Shared Main" : "My Space"}</span>
             <h2 className="m-0 text-xl font-semibold tracking-tight text-[#F2F0E8]">Locate a sign</h2>
           </div>
           {isAdmin && (
@@ -174,7 +188,7 @@ export function ReviewFlagged() {
       {recordings.length === 0 && !isLoading ? (
         <section className="cyber-panel grid min-h-52 place-items-center p-6 text-center">
           <div>
-            <span className="cyber-page__eyebrow justify-center before:hidden">Review queue idle</span>
+            <span className="ss-eyebrow justify-center before:hidden">Review queue idle</span>
             <h2 className="m-0 text-2xl font-semibold uppercase tracking-tight text-[#F2F0E8]">
               No takes loaded
             </h2>

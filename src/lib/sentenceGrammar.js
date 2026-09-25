@@ -58,7 +58,7 @@ function spokenWord(signId) {
  * literal reading we're trying to improve on, so nothing is ever lost - 
  * it's only ever made more natural where a rule applies.
  */
-export function buildSpokenPhrases(signIds, { autoGrammar = true } = {}) {
+export function buildSpokenPhrases(signIds, { autoGrammar = true, fallbackOut = null } = {}) {
   const phrases = [];
   let i = 0;
 
@@ -78,6 +78,14 @@ export function buildSpokenPhrases(signIds, { autoGrammar = true } = {}) {
 
       if (setEquals(windowOf3, new Set(["what", "name", "you"]))) {
         phrases.push("What is your name?");
+        i += 3;
+        continue;
+      }
+      // "Where"/"How"/"You" in any adjacent order ask one combined
+      // question - same topic-comment reasoning as above, so match as a
+      // set: "Where and how are you?" must keep all three words.
+      if (setEquals(windowOf3, new Set(["where", "how", "you"]))) {
+        phrases.push("Where and how are you?");
         i += 3;
         continue;
       }
@@ -138,6 +146,9 @@ export function buildSpokenPhrases(signIds, { autoGrammar = true } = {}) {
     // the path every word takes when autoGrammar is off: no injected
     // subject/verb/article, just the word itself, so the signer's own
     // choice and order of signs is what gets spoken, unaltered.
+    // Words landing here have NO grammar rule - callers can collect them
+    // via fallbackOut to decide whether AI sentence formation is needed.
+    if (Array.isArray(fallbackOut)) fallbackOut.push(current);
     phrases.push(capitalize(spokenWord(current)));
     i += 1;
   }

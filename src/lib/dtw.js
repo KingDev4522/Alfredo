@@ -14,7 +14,6 @@
  * MediaPipe's 21-point hand model numbers fingertips as: thumb=4,
  * index=8, middle=12, ring=16, pinky=20.
  */
-const FINGERTIP_INDICES = new Set([4, 8, 12, 16, 20]);
 
 /**
  * Downsamples a sequence to at most maxFrames by evenly picking frames

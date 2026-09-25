@@ -10,6 +10,7 @@ from utils.job_manager import (
     get_text_chunk
 )
 from utils.ai_pipeline import translate_and_generate_poses
+from utils.model_registry import ModelUnavailableError, get_translator
 
 router = APIRouter()
 
@@ -39,6 +40,15 @@ async def websocket_stream(
     state = await get_job_state(job_id)
     current_chunk_id = max(0, state["last_generated_chunk_id"] + 1) if state else 0
 
+    # Resolved once per connection: loads the cached model on first use.
+    # If unavailable, translator stays None and the pipeline animates the
+    # input words directly (DB lookup + fingerspelling) instead of failing.
+    try:
+        translator = get_translator(websocket.app)
+    except ModelUnavailableError as e:
+        print(f"[stream] {e}")
+        translator = None
+
     async def sender_task():
         nonlocal current_timestamp_ms, current_chunk_id
         
@@ -50,7 +60,7 @@ async def websocket_stream(
                 break
                 
             # Pass chunk into the AI Pipeline
-            async for pose_data in translate_and_generate_poses(text_chunk, websocket.app.state.translator):
+            async for pose_data in translate_and_generate_poses(text_chunk, translator):
                 
                 # --- BACKPRESSURE LOGIC ---
                 while True:

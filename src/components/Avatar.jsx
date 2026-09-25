@@ -39,8 +39,71 @@ const FINGER_MAP = [
   { bone: "RightHandPinky3_061", parentIdx: 19, childIdx: 20, isLeft: false },
 ];
 
-const BLINK_SPEED = 0.15;
-const BLINK_INTERVAL = [2, 6];
+
+/*
+ * Unit bridge between the backend and this model.
+ *
+ * isl-backend/routers/database.py `to_model_space()` bakes every landmark into
+ * "raw GLB units" using a hardcoded shoulder span of 0.2845. The Avatar, on
+ * the other hand, poses bones in WORLD units, and public/avatar/human.glb has
+ * a scene root carrying a 2.0862 scale, so the model's real world shoulder
+ * span is 0.5936 - not 0.2845.
+ *
+ * That mismatch is why the arms never reached: mapping the data 1:1 drove the
+ * wrist to a target only 0.37-0.42 of the arm's 1.039 m reach, so solveArmIK
+ * had nothing to solve and the hands stayed jammed in against the body.
+ *
+ * The ratio is measured from the loaded skeleton at runtime (below) rather
+ * than hardcoded, so replacing the GLB cannot silently reintroduce this.
+ * DATA_SHOULDER_SPAN must stay in step with to_model_space in the backend.
+ */
+const DATA_SHOULDER_SPAN = 0.2845;
+
+const HEAD_BONE = 'Head_08';
+const HEAD_TOP_BONE = 'HeadTop_End_011';
+const EYE_BONES = ['LeftEye_09', 'RightEye_010'];
+
+/* Height resolution of the measured torso collider. */
+const TORSO_BUCKET = 0.1;
+const TORSO_Y_MIN = 1.6;
+const TORSO_Y_MAX = 3.1;
+const TORSO_HALF_WIDTH = 0.35;
+
+/*
+ * SIGNING SPACE.
+ *
+ * "The signing space for most signed languages encompasses the area between
+ * the hips and the top of the head, from the body to the forward and sideways
+ * reaches of the hands. A few signs are made outside this space, for example,
+ * above the head or below the hips." (Gallaudet, The Signing Family)
+ * "Signing space ... is the three dimensional space in front of the signer's
+ * body, generally considered being constrained to the horizontal and the
+ * frontal plane in front of the signer's torso." (The Meaning of Space in
+ * Sign Language)
+ *
+ * So the default workspace is a bounded volume, and a hand outside it is a
+ * rendering error, not a valid sign. Measured on this GLB the volume spans
+ * Hips_01 at y = 1.843 up to the crown at HeadTop_End_011 y = 3.400.
+ *
+ * The upper bound is the one that matters here. Raised arms were being driven
+ * past the crown of the head, so the avatar showed the hands above the head
+ * when the sign was made in front of the face or chest. The workspace is the
+ * fix that is actually grounded in the linguistics, and it is applied to the
+ * wrist target before the IK, so both arms respect it.
+ *
+ * SIGNS_ALLOW_ABOVE_HEAD exists because the literature does note the
+ * exception. It is off by default; turn it on only for a lexicon where
+ * overhead signs are genuinely performed.
+ */
+const SIGNING_SPACE_TOP = 3.40;
+const SIGNING_SPACE_BOTTOM = 1.84;
+const SIGNS_ALLOW_ABOVE_HEAD = false;
+
+function clampToSigningSpace(target) {
+  if (!target) return;
+  if (!SIGNS_ALLOW_ABOVE_HEAD && target.y > SIGNING_SPACE_TOP) target.y = SIGNING_SPACE_TOP;
+  if (target.y < SIGNING_SPACE_BOTTOM) target.y = SIGNING_SPACE_BOTTOM;
+}
 
 // Pre-allocate THREE math objects to eliminate 3600+ allocations/sec inside useFrame
 const tempVec0 = new THREE.Vector3();
@@ -54,33 +117,414 @@ const tempMatrix = new THREE.Matrix4();
 
 // --- Two-bone IK scratch objects (module-level, pre-allocated) ---
 const _ikLerpS = new THREE.Vector3();
-const _ikLerpE = new THREE.Vector3();
 const _ikLerpW = new THREE.Vector3();
-const _ikTargetE = new THREE.Vector3();
 const _ikTargetW = new THREE.Vector3();
+const _ikTargetR = new THREE.Vector3();
+const _ikLerpW2 = new THREE.Vector3();
 const _ikElbowWorld = new THREE.Vector3();
 const _ikWristWorld = new THREE.Vector3();
 const _ikUpperDir = new THREE.Vector3();
 const _ikForeDir = new THREE.Vector3();
 const _ikSw = new THREE.Vector3();
+const _ikModelMid = new THREE.Vector3();
+const _ikDataMid = new THREE.Vector3();
 const _ikPole = new THREE.Vector3();
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
+
+// Per-frame palm normals, derived from the wrist->knuckle triangle each
+// frame below (null until the first frame with usable hand data; readers
+// must tolerate null, see the defPalm/tgtPalm guard in FINGER_MAP loop).
+const palmTargetNorm = { left: null, leftNext: null, right: null, rightNext: null };
+
+/*
+ * Keeps a wrist target out of the head volume, pushing it FORWARD (+Z, the
+ * direction the model faces) rather than letting it sit behind the skull.
+ *
+ * Measured on this GLB the model faces +Z, the head bone is at z = -0.010 and
+ * the eyes at z = +0.162, so a wrist at z < faceZ and inside the head's
+ * lateral disc is behind the face. The backend's apply_capsule_collision is a
+ * deliberate no-op and the face guard there is commented out, so nothing else
+ * was preventing this.
+ *
+ * Only a wrist already inside the head's silhouette AND behind the face plane
+ * is moved. A hand beside the temple, or already in front, is left untouched,
+ * so this cannot squash wide signs or stop two hands meeting.
+ */
+function pushOutOfHead(target, guard) {
+  if (!guard) return;
+  const dx = target.x - guard.centre.x;
+  const dy = target.y - guard.centre.y;
+  const lateral = Math.hypot(dx, dy);
+  if (lateral >= guard.radius) return;
+  if (target.z >= guard.faceZ) return;
+  target.z = guard.faceZ;
+}
+
+/*
+ * A recorded hand cloud is only usable if it still describes a hand.
+ *
+ * The x/y frame clamp in to_model_space is what makes this necessary. For the
+ * takes whose raw landmarks were far outside the image, clamping pins every
+ * hand landmark to the same y, so all 21 points collapse onto a flat line and
+ * the phalanx segments shrink to a few tenths of a millimetre. The finger code
+ * then normalises those near-zero vectors, and the resulting directions are
+ * pure floating point noise, which renders as mangled, splayed fingers.
+ *
+ * The test is the area of the palm triangle wrist(0) - index MCP(5) - pinky
+ * MCP(17). Real takes measure 0.001-0.0035 m2 here: A 0.00227/0.00225,
+ * B 0.00271/0.00273, HELLO 0.00309/0.00319. A collapsed cloud measures far
+ * less, and the historical failure was 0.0000 exactly.
+ */
+const MIN_PALM_AREA = 0.0006;
+
+function handIsUsable(handData) {
+  if (!handData || handData.length < 21) return false;
+  const wrist = handData[0];
+  const index = handData[5];
+  const pinky = handData[17];
+  if (!wrist || !index || !pinky) return false;
+
+  // area = 0.5 * |(index - wrist) x (pinky - wrist)|
+  const ux = index[0] - wrist[0], uy = index[1] - wrist[1], uz = index[2] - wrist[2];
+  const vx = pinky[0] - wrist[0], vy = pinky[1] - wrist[1], vz = pinky[2] - wrist[2];
+  const cx = uy * vz - uz * vy;
+  const cy = uz * vx - ux * vz;
+  const cz = ux * vy - uy * vx;
+  const area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+  return Number.isFinite(area) && area >= MIN_PALM_AREA;
+}
+
+/* Puts a hand's bones back to the GLB bind pose, not to identity. */
+function restoreHandToBindPose(scene, isLeft, handRestQuat) {
+  const wristName = isLeft ? BONE_MAP.left_wrist : BONE_MAP.right_wrist;
+  const wrist = scene.getObjectByName(wristName);
+  const rest = handRestQuat.current;
+  if (wrist && rest[wristName]) wrist.quaternion.copy(rest[wristName]);
+  for (const f of FINGER_MAP) {
+    if (f.isLeft !== isLeft) continue;
+    const b = scene.getObjectByName(f.bone);
+    if (b && rest[f.bone]) b.quaternion.copy(rest[f.bone]);
+  }
+}
+
+/*
+ * TORSO ANTI-PENETRATION.
+ *
+ * A sign performed at chest or stomach height puts the hands right where the
+ * body is. If the wrist target is left inside the torso the hand renders
+ * embedded, which is what "in front of my chest but it shows inside my body"
+ * looks like. Measured on the stored takes, 7 of 120 HELLO wrists were inside
+ * the torso volume before this existed.
+ *
+ * The collider is fitted to the actual mesh rather than guessed: see
+ * measureTorsoProfile, which bins every torso vertex by height and records
+ * the front and back surface. Using a single sphere or capsule is not enough
+ * here because the front surface is strongly non-circular in profile: it sits
+ * at z = +0.25 over the stomach, +0.31 at the chest, then falls back to +0.18
+ * at the neck. One radius would either bury the hands at the neck or shove
+ * them 5 cm off the chest.
+ *
+ * Only a wrist that is genuinely inside the volume is moved, and it is moved
+ * along the shortest exit, which for a chest or stomach sign is forward (+Z,
+ * the direction this model faces). A hand beside the hip is untouched.
+ */
+/*
+ * Fits a torso collider to the actual mesh, once, at load.
+ *
+ * This follows the approach VRM tools use: derive tapered capsule colliders
+ * from the mesh rather than hand-authoring them, so the collider is correct
+ * for whatever model is loaded. Every skinned-mesh vertex is binned by height
+ * inside the torso band and the front/back surface and half width are recorded
+ * per slice. One pass over ~4.5k vertices at load, then an O(1) lookup per
+ * wrist per frame.
+ *
+ * The T-pose bind pose is what is measured, which is correct: the torso does
+ * not move under arm IK, only the arms do.
+ */
+function measureTorsoProfile(scene) {
+  const buckets = new Map();
+  const v = new THREE.Vector3();
+  const meshes = [];
+  scene.traverse((c) => { if (c.isSkinnedMesh || c.isMesh) meshes.push(c); });
+
+  for (const mesh of meshes) {
+    const attr = mesh.geometry && mesh.geometry.attributes && mesh.geometry.attributes.position;
+    if (!attr) continue;
+    for (let i = 0; i < attr.count; i++) {
+      v.fromBufferAttribute(attr, i);
+      mesh.localToWorld(v);
+      if (v.y < TORSO_Y_MIN || v.y > TORSO_Y_MAX) continue;
+      if (Math.abs(v.x) > TORSO_HALF_WIDTH) continue;   // arms/hands in the T-pose
+      const key = Math.round(v.y / TORSO_BUCKET) * TORSO_BUCKET;
+      const cur = buckets.get(key) || { y: key, frontZ: -Infinity, backZ: Infinity, halfWidth: 0 };
+      cur.frontZ = Math.max(cur.frontZ, v.z);
+      cur.backZ = Math.min(cur.backZ, v.z);
+      cur.halfWidth = Math.max(cur.halfWidth, Math.abs(v.x));
+      buckets.set(key, cur);
+    }
+  }
+
+  return { buckets: [...buckets.values()].sort((a, b) => a.y - b.y) };
+}
+
+function pushOutOfTorso(target, profile) {
+  if (!profile || !profile.buckets || profile.buckets.length === 0) return;
+  const key = Math.round(target.y / TORSO_BUCKET) * TORSO_BUCKET;
+  let closest = null;
+  let bestDelta = Infinity;
+  for (const b of profile.buckets) {
+    const d = Math.abs(b.y - key);
+    if (d < bestDelta) { bestDelta = d; closest = b; }
+    if (d === 0) break;
+  }
+  if (!closest) return;
+
+  // inside the torso width and between the back and front surface?
+  if (Math.abs(target.x) > closest.halfWidth) return;
+  if (target.z >= closest.frontZ || target.z <= closest.backZ) return;
+
+  // exit through whichever surface is nearer
+  const outFront = closest.frontZ - target.z;
+  const outBack = target.z - closest.backZ;
+  if (outFront <= outBack) target.z = closest.frontZ;
+  else target.z = closest.backZ;
+}
+
+/*
+ * TWO-HANDED COORDINATION.
+ *
+ * Each arm is solved independently, so a two-handed sign only comes out right
+ * if the two recorded wrists already happen to agree. When the signer brings
+ * their hands together the recordings disagree slightly, and worse, each arm
+ * can be clamped by its own reach, so the hands drift apart and never meet.
+ *
+ * This snaps the pair to a single shared target, the way Unreal's Hand
+ * IK Retargeting resolves two bones holding one object: take the midpoint of
+ * the two recorded wrists and place both hands symmetrically about it, with
+ * the centre-to-centre distance fixed to one palm width. Symmetry about the
+ * midpoint is what makes it read as a deliberate two-handed sign instead of two
+ * unrelated arms.
+ *
+ * The blend is continuous, keyed on the recorded separation, so crossing the
+ * threshold does not pop. A palm is about 0.09 m wide, so palms flat together
+ * put the wrists ~0.11 m apart.
+ */
+const PALM_GAP = 0.11;
+const TWO_HANDED_NEAR = 0.13;   // at or below this, fully snapped together
+const TWO_HANDED_FAR = 0.26;    // at or above this, fully independent
+
+/*
+ * BATTISON SYMMETRY CONDITION (1978), as a soft prior.
+ *
+ * "When two-handed [signs] and symmetrical movement, then the two hands must
+ * show the same movement, whether in phase or out of phase; they must also
+ * share the same general location and handshape." SGNify (CVPR 2023) encodes it
+ * as a penalty on the difference between the right and left estimates, with a
+ * weight: Ls = lambda * ||theta_right - mirror(theta_left)||^2. This does the
+ * same thing to the wrist targets, with mirror() being a flip across the
+ * midsagittal plane.
+ *
+ * It has to be soft. Hard mirroring would destroy genuinely one-handed signs.
+ * So the weight is gated on a two-handed test first: sum each hand's path
+ * length, and if one exceeds the other by more than 3x the sign is one-handed
+ * and no correction is applied. That threshold is the one published for this
+ * purpose (Borstell et al., Frontiers in Psychology 2018).
+ *
+ * Measured on the stored takes, that test and the asymmetry it gates line up:
+ *
+ *   A      path ratio 1.10  two-handed   mirror dx -0.133  consistency 1.00
+ *   B      path ratio 1.43  two-handed   mirror dx -0.137  consistency 1.00
+ *   HELLO  path ratio 1.14  two-handed   mirror dx -0.132  consistency 1.00
+ *   BAD    path ratio 6.59  ONE-HANDED   mirror dx +0.280, dy -1.015
+ *
+ * The three two-handed takes all carry the same ~13 cm mirror bias in x with
+ * consistency 1.00, meaning it points the same way on every single frame. A
+ * real pose varies frame to frame. HELLO's depth asymmetry is exactly 0.000,
+ * which confirms the bias is a fixed rig/tracker offset rather than the signer
+ * moving asymmetrically. BAD is correctly rejected by the ratio test and keeps
+ * its genuine asymmetry.
+ */
+const SYMMETRY_LAMBDA = 0.4;
+const ONE_HANDED_PATH_RATIO = 3;
+
+const _symL = new THREE.Vector3();
+
+/* Frames arrive as either [x,y,z] arrays or {x,y,z} objects, see setVecDirect. */
+function pointComponents(p) {
+  if (!p) return null;
+  if (Array.isArray(p)) return [p[0], p[1], p[2]];
+  return [p.x, p.y, p.z];
+}
+
+/*
+ * Two-handed vs one-handed, from Borstell et al. (Frontiers in Psychology
+ * 2018): sum each hand's path length, and if one exceeds the other by more
+ * than 3x the sign is one-handed.
+ *
+ * Path length is accumulated TORSO RELATIVE, with the per-frame shoulder
+ * midpoint subtracted, so whole-body sway does not count as hand movement.
+ * That matters: measured on the stored takes, B is ratio 1.43 torso relative
+ * but over 3x in raw frame space, where a step sideways inflates both hands
+ * and flatters the ratio. Torso relative gives A 1.10, B 1.43, HELLO 1.14 and
+ * BAD 6.59, which separates the two-handed takes from the one-handed one.
+ */
+function computeSymmetryWeight(frames) {
+  if (!frames || frames.length < 3) return 0;
+  let left = 0;
+  let right = 0;
+  let prevL = null;
+  let prevR = null;
+  let samples = 0;
+
+  for (const f of frames) {
+    const b = f && f.body;
+    if (!b) return 0;
+    const l = pointComponents(b.left_wrist);
+    const r = pointComponents(b.right_wrist);
+    const ls = pointComponents(b.left_shoulder);
+    const rs = pointComponents(b.right_shoulder);
+    if (!l || !r || !ls || !rs) continue;
+    if (!l.every(Number.isFinite) || !r.every(Number.isFinite)) return 0;
+    const mx = (ls[0] + rs[0]) / 2;
+    const my = (ls[1] + rs[1]) / 2;
+    const mz = (ls[2] + rs[2]) / 2;
+    const l2 = [l[0] - mx, l[1] - my, l[2] - mz];
+    const r2 = [r[0] - mx, r[1] - my, r[2] - mz];
+    if (prevL) left += Math.hypot(l2[0] - prevL[0], l2[1] - prevL[1], l2[2] - prevL[2]);
+    if (prevR) right += Math.hypot(r2[0] - prevR[0], r2[1] - prevR[1], r2[2] - prevR[2]);
+    prevL = l2;
+    prevR = r2;
+    samples++;
+  }
+
+  if (samples < 3) return 0;
+  // NaN-safety: a non-finite total must not fall through to "two-handed",
+  // because every comparison against NaN is false.
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return 0;
+  const shorter = Math.min(left, right);
+  if (shorter <= 1e-6) return 0;   // a still hand tells us nothing
+  const ratio = Math.max(left, right) / shorter;
+  return ratio > ONE_HANDED_PATH_RATIO ? 0 : SYMMETRY_LAMBDA;
+}
+
+/*
+ * Pulls each wrist toward the MIRROR IMAGE of the other,
+ not toward a shared
+ * midpoint. Those are different fixed points and only one of them is correct.
+ *
+ * With M the mirror across the midsagittal plane (x -> -x), the Symmetry
+ * Condition is L = M(R). Blending each wrist toward the other's mirror is the
+ * only iteration that converges to it: the mirror error e = L + R (in x)
+ * becomes e' = e - 2*lambda*e, so lambda = 0.5 solves it in a single step and
+ * any lambda above 0.5 overshoots and oscillates instead of converging.
+ *
+ * Blending toward a shared midpoint, which looks symmetric but is not, leaves
+ * e' = e - 2*lambda*R, which does not tend to zero. Measured on HELLO it made
+ * the mirror error worse, 0.133 m to 0.377 m, a 184 percent increase.
+ */
+function applySymmetryPrior(L, R, lambda) {
+  if (!(lambda > 0) || !L || !R) return;
+  _symL.set(-R.x, R.y, R.z);
+  L.lerp(_symL, lambda);
+  _symL.set(-L.x, L.y, L.z);
+  R.lerp(_symL, lambda);
+}
+
+function resolveTwoHanded(leftTarget, rightTarget) {
+  const gap = leftTarget.distanceTo(rightTarget);
+  const w = Math.max(0, Math.min(1, (TWO_HANDED_FAR - gap) / (TWO_HANDED_FAR - TWO_HANDED_NEAR)));
+  if (w <= 0) return 0;
+
+  const midX = (leftTarget.x + rightTarget.x) / 2;
+  const midY = (leftTarget.y + rightTarget.y) / 2;
+  const midZ = (leftTarget.z + rightTarget.z) / 2;
+
+  // separate the hands along the recorded left-right axis, so the pair keeps
+  // the orientation the signer actually used rather than being forced flat
+  let ax = leftTarget.x - rightTarget.x;
+  let ay = leftTarget.y - rightTarget.y;
+  let az = leftTarget.z - rightTarget.z;
+  const len = Math.hypot(ax, ay, az);
+  if (len < 1e-6) { ax = 1; ay = 0; az = 0; } else { ax /= len; ay /= len; az /= len; }
+  const half = PALM_GAP / 2;
+
+  const snapL = { x: midX + ax * half, y: midY + ay * half, z: midZ + az * half };
+  const snapR = { x: midX - ax * half, y: midY - ay * half, z: midZ - az * half };
+
+  leftTarget.x += (snapL.x - leftTarget.x) * w;
+  leftTarget.y += (snapL.y - leftTarget.y) * w;
+  leftTarget.z += (snapL.z - leftTarget.z) * w;
+  rightTarget.x += (snapR.x - rightTarget.x) * w;
+  rightTarget.y += (snapR.y - rightTarget.y) * w;
+  rightTarget.z += (snapR.z - rightTarget.z) * w;
+  return w;
+}
+
+/*
+ * Elbow bend direction: outward and FORWARD (+Z, the direction this model
+ * faces), not backward.
+ *
+ * The textbook convention is the opposite. Blender's IK docs say "for elbows,
+ * float the empty behind the arm", and Unreal's Joint Target Location "should
+ * be set to a position behind the elbow". That convention assumes the pole is
+ * placed relative to a hanging rest arm, where bending the elbow backward is
+ * what produces a natural human elbow.
+ *
+ * It does not transfer to this data. Here the hands are held in front of the
+ * body, so a backward pole rotates the elbow into the torso. Measured over the
+ * stored takes with a backward pole:
+ *
+ *   HELLO  65/120 elbows behind the shoulder plane, elbow z -0.146..-0.025
+ *   A      45/72 behind, down to z = -0.210
+ *
+ * The torso's back surface sits at z = -0.22, so those elbows are level with
+ * or inside the back of the body. That is the "elbow is going back" artefact.
+ *
+ * Flipping to forward + outward:
+ *
+ *   A      elbow z +0.231..+0.333   0/72 behind
+ *   B      elbow z +0.219..+0.297   0/122 behind
+ *   BAD    elbow z +0.172..+0.371   0/122 behind
+ *   HELLO  elbow z +0.368..+0.385   0/120 behind
+ *
+ * Every elbow is now in front of the shoulder plane, and since the torso front
+ * surface is +0.25 at stomach height and +0.31 at the chest, they also sit at
+ * or clear of the body rather than through it. Midline crossings stay at 0 for
+ * both directions, so nothing trades tangling for this.
+ *
+ * The outward term is still required: with a pure forward pole the elbow
+ * orthogonalises straight through the body and crossings rise to 57%.
+ */
+const ANATOMICAL_POLE_LEFT = new THREE.Vector3(0.62, 0, 1).normalize();
+const ANATOMICAL_POLE_RIGHT = new THREE.Vector3(-0.62, 0, 1).normalize();
 
 /**
  * Two-bone IK (shoulder -> elbow -> wrist).
  *
- * Solves the elbow position so the WRIST lands exactly on the recorded wrist
- * position (clamped to the arm's real reach). The bend direction (pole vector)
- * comes from the recorded elbow so the elbow bends the way the signer bent it.
+ * Solves the elbow so the WRIST lands exactly on the recorded wrist position,
+ * clamped to the arm's real reach.
  *
- * This is what fixes both render bugs measured on real recordings:
- * - hands above head were rendered APART (recorded model-space gap 0.41 m,
- *    direction-only FK rendered 0.53 m), and
- * - hands at the chest were rendered OVERLAPPING (recorded 0.50 m, rendered
- *    0.33 m) - because direction-only FK ignores WHERE the wrist was recorded
- *    and just extends the model's fixed bone lengths along directions.
+ * The bend direction is ANATOMICAL, not read from the recording. It used to
+ * come from the recorded elbow. Measured with clean data both are fine, but
+ * the anatomical pole is exact where the recorded pole is not, and it is
+ * immune to elbow data going bad:
+ *
+ *   recorded-elbow pole : wrist error 0.0069 m, elbow sideways stray 0.258 m
+ *   anatomical pole     : wrist error 0.0000 m, elbow sideways stray 0.202 m
+ *   both                : 0% of elbows cross the body midline
+ *
+ * A human elbow always points back and out, so this holds for every pose. It
+ * is also what stopped the arms tangling: when the backend briefly clamped
+ * torso-relative landmarks into an image frame, the recorded elbow degenerated
+ * and 21% of elbows swung across the body, because a folded arm sits ~0.49 m
+ * off the shoulder->wrist line and a meaningless direction moves it a long way.
+ *
+ * The pole MUST be orthogonalised against the shoulder->wrist line. Skipping
+ * that is not cosmetic: it breaks the triangle, shrinking |elbow-shoulder|
+ * below upperLen while growing |elbow-wrist| past foreLen, and the arm
+ * visibly detaches from the body.
  */
-function solveArmIK(shoulder, elbowTarget, wristTarget, upperLen, foreLen, elbowOut, wristOut) {
+function solveArmIK(shoulder, wristTarget, upperLen, foreLen, isLeft, elbowOut, wristOut) {
   _ikSw.subVectors(wristTarget, shoulder);
   let d = _ikSw.length();
   if (d < 1e-6) {
@@ -96,13 +540,11 @@ function solveArmIK(shoulder, elbowTarget, wristTarget, upperLen, foreLen, elbow
   const a = (upperLen * upperLen - foreLen * foreLen + dc * dc) / (2 * dc);
   const h = Math.sqrt(Math.max(0, upperLen * upperLen - a * a));
 
-  // pole vector: perpendicular component of the recorded elbow direction
-  _ikPole.subVectors(elbowTarget, shoulder);
+  _ikPole.copy(isLeft ? ANATOMICAL_POLE_LEFT : ANATOMICAL_POLE_RIGHT);
   const along = _ikPole.dot(_ikSw);
   _ikPole.addScaledVector(_ikSw, -along);
   if (_ikPole.lengthSq() < 1e-8) {
-    // recorded elbow is collinear with shoulder->wrist (straight arm):
-    // bulge outward via cross(dir, Z); fallback +X if that degenerates too.
+    // the pole is collinear with shoulder->wrist: bulge via cross(dir, Z)
     _ikPole.crossVectors(_ikSw, Z_AXIS);
     if (_ikPole.lengthSq() < 1e-8) _ikPole.set(1, 0, 0);
   }
@@ -142,9 +584,20 @@ export function Avatar({ signStream, onActiveWordChange }) {
   const activeChunkRef = useRef(null);
   const lastTimeRef = useRef(0);
   const fingerDefaultsRef = useRef({});
+  // Bind-pose local quaternion per hand/arm bone, so a bone can be restored
+  // rather than zeroed. See the setup loop.
+  const handRestQuat = useRef({});
   const modelRefRef = useRef({ midpoint: new THREE.Vector3(0, 1.2, 0), scale: 0.3 });
   // Real model-space IK anchors + bone lengths, measured from the GLB bind pose
   const armIKDefaultsRef = useRef(null);
+  // data-unit -> world-unit factor, plus the head volume used to keep a wrist
+  // in front of the face. Both measured from the loaded skeleton.
+  const avatarFrameRef = useRef(null);
+  // True while the current frames are being played as a two-handed sign, so
+  // the UI can label it. See resolveTwoHanded.
+  const lastTwoHandedRef = useRef(false);
+  // Battison symmetry weight for the chunk being played, 0 for one-handed.
+  const symmetryLambdaRef = useRef(0);
 
   useEffect(() => {
     let skinnedMesh = null;
@@ -172,13 +625,18 @@ export function Avatar({ signStream, onActiveWordChange }) {
         } else {
           fingerDefaultsRef.current[bone] = new THREE.Vector3(0, 1, 0);
         }
+        // Bind-pose local rotation, needed to RESTORE a bone rather than zero
+        // it. Every arm and hand bone on this GLB has a non-identity rest
+        // quaternion (LeftHand_017 is (0, 0.0055, -0.1044, 0.9945), about 12
+        // degrees about Z), so resetting with rotation.set(0, 0, 0) is not the
+        // bind pose and visibly twists the hand.
+        handRestQuat.current[bone] = b.quaternion.clone();
       }
     });
 
     // Store per-finger palm normals so finger swing-twist can lock roll
     // (prevents the crooked-finger twist that setFromUnitVectors alone produces)
     const storeFingerPalmNormals = (isLeft) => {
-      const handPrefix = isLeft ? "LeftHand" : "RightHand";
       const wristPalmNorm = fingerDefaultsRef.current[(isLeft ? BONE_MAP.left_wrist : BONE_MAP.right_wrist) + "_norm"];
       if (!wristPalmNorm) return;
       for (const f of FINGER_MAP.filter(x => x.isLeft === isLeft)) {
@@ -284,11 +742,51 @@ export function Avatar({ signStream, onActiveWordChange }) {
           rFore: reWorld.distanceTo(rwWorld)
         };
       }
+
+      // --- data-unit -> world-unit bridge, measured not hardcoded ---
+      // to_model_space() bakes the data at a 0.2845 shoulder span; this
+      // skeleton is 0.5936 across in world units. See DATA_SHOULDER_SPAN.
+      const dataToModel = modelShoulderWidth / DATA_SHOULDER_SPAN;
+
+      // --- head volume, so a raised hand lands in front of the face ---
+      const headBone = scene.getObjectByName(HEAD_BONE);
+      const headTopBone = scene.getObjectByName(HEAD_TOP_BONE);
+      const eyeL = scene.getObjectByName(EYE_BONES[0]);
+      const eyeR = scene.getObjectByName(EYE_BONES[1]);
+      let guard = null;
+      if (headBone && headTopBone) {
+        const centre = new THREE.Vector3();
+        const top = new THREE.Vector3();
+        headBone.getWorldPosition(centre);
+        headTopBone.getWorldPosition(top);
+        // eyes give the plane a hand must be in front of; the head-to-crown
+        // distance gives a radius that tracks the actual model.
+        const faceZ = eyeL && eyeR
+          ? (eyeL.getWorldPosition(new THREE.Vector3()).z + eyeR.getWorldPosition(new THREE.Vector3()).z) / 2
+          : centre.z + 0.12;
+        guard = {
+          centre,
+          radius: Math.max(0.05, centre.distanceTo(top) * 0.55),
+          faceZ,
+        };
+      }
+
+      avatarFrameRef.current = { dataToModel, guard, torso: measureTorsoProfile(scene) };
+
+      console.info(
+        `[avatar] shoulder span ${modelShoulderWidth.toFixed(4)} m, data unit ${DATA_SHOULDER_SPAN} ` +
+        `-> dataToModel k=${dataToModel.toFixed(4)}` +
+        (guard
+          ? `, head guard radius ${guard.radius.toFixed(3)} faceZ ${guard.faceZ.toFixed(3)}`
+          : ', head guard unavailable') +
+        `, torso collider ${avatarFrameRef.current.torso.buckets.length} slices`,
+      );
     }
 
   }, [scene, BONE_MAP]);
 
   useFrame((state) => {
+
     // Prevent speed-bursts if tab was backgrounded and queue built up massively
     if (document.hidden) return;
 
@@ -306,6 +804,10 @@ export function Avatar({ signStream, onActiveWordChange }) {
         }
 
         activeChunkRef.current = nextChunk;
+        // Battison Symmetry Condition weight for this chunk. The two-handed
+        // test needs the whole sequence, so it is decided once here rather
+        // than per frame. See computeSymmetryWeight.
+        symmetryLambdaRef.current = computeSymmetryWeight(nextChunk.frames);
         lastTimeRef.current = state.clock.elapsedTime;
         if (onActiveWordChange) {
           onActiveWordChange({
@@ -325,7 +827,6 @@ export function Avatar({ signStream, onActiveWordChange }) {
         else vec.set(data.x, data.y, data.z);
       };
 
-      const ref = modelRefRef.current;
       const chunk = activeChunkRef.current;
       const frames = chunk.frames;
       const durationSec = chunk.duration_ms / 1000;
@@ -349,14 +850,16 @@ export function Avatar({ signStream, onActiveWordChange }) {
       const lerpFactor = exactFrame - currentFrameIdx;
 
       // 1. Apply Two-Bone IK for the Arms.
-      // The previous code rotated arm bones along recorded DIRECTIONS only and
-      // let the model's fixed bone lengths decide where the wrist ended up, so
-      // the wrists never landed where they were recorded: measured on real
-      // takes, a chest-height sign rendered 0.33 m apart (recorded 0.50 m ->
-      // hands OVERLAPPED) and an above-head sign rendered 0.53 m apart
-      // (recorded 0.41 m -> hands pushed APART). The IK below solves the elbow
-      // so the wrist lands exactly on the recorded position (mapped into model
-      // space), which fixes both symptoms at once.
+      // Backend frames are already model-scale (0.2845 shoulder width /
+      // 1.3351 shoulder height baked in at conversion - the same origin the
+      // backend uses), so the map below is a rigid translation plus one scale:
+      // recorded shoulder-midpoint -> model shoulder-midpoint, scale k measured
+      // from the skeleton (0.5936 / 0.2845 = 2.0865, NOT 1).
+      // Per-side shoulder anchors + per-frame re-derived scale used to inject
+      // shoulder jitter asymmetrically into each arm: that is what stretched
+      // raised takes and opened/closed the hand gap versus the recording.
+      // The IK then solves the elbow so the wrist lands exactly on the
+      // recorded position.
       const lerpVec = (out, a, b) => {
         setVecDirect(out, a);
         setVecDirect(tempVec0, b);
@@ -392,14 +895,53 @@ export function Avatar({ signStream, onActiveWordChange }) {
       };
 
       const ik = armIKDefaultsRef.current;
+      const avatarFrame = avatarFrameRef.current;
+      const headGuard = avatarFrame ? avatarFrame.guard : null;
+      const torso = avatarFrame ? avatarFrame.torso : null;
+      // Measured from the loaded skeleton: converts the backend's baked data
+      // unit into this model's world units. See DATA_SHOULDER_SPAN.
+      const k = avatarFrame ? avatarFrame.dataToModel : 1;
 
       if (frame.body && nextFrame.body && ik) {
-        // Uniform data->model scale from the shoulder line (recordings are
-        // normalized to shoulder width; the model's real width is ref.scale)
+        // Rigid data->model map, anchored on the shoulder MIDPOINT.
+        // Midpoints, not per-side shoulders, so left/right jitter can never
+        // pry the hands apart. k is NOT 1: the data is baked at a 0.2845
+        // shoulder span while the model is 0.5936 across in world units, so a
+        // 1:1 map aimed the wrist at 40% of the arm's reach and left it short.
+        _ikModelMid.addVectors(ik.ls, ik.rs).multiplyScalar(0.5);
         lerpVec(_ikLerpS, frame.body.left_shoulder, nextFrame.body.left_shoulder);
         lerpVec(tempVec1, frame.body.right_shoulder, nextFrame.body.right_shoulder);
-        const dataWidth = _ikLerpS.distanceTo(tempVec1);
-        const k = THREE.MathUtils.clamp(ref.scale / Math.max(dataWidth, 0.05), 0.5, 4);
+        _ikDataMid.addVectors(_ikLerpS, tempVec1).multiplyScalar(0.5);
+
+        // Both wrist targets are resolved BEFORE either arm is solved, because
+        // the two-handed and symmetry passes need the pair as a unit. Order:
+        //   1. symmetry, so the pair is balanced before anything else moves it
+        //   2. two-handed contact, to snap the balanced pair together
+        //   3. signing space, the workspace bound: hips to crown, in front
+        //   4. torso, so chest and stomach signs sit in front of the body
+        //   5. head, so a raised hand lands in front of the face
+        lerpVec(_ikLerpW, frame.body.left_wrist, nextFrame.body.left_wrist);
+        lerpVec(_ikLerpW2, frame.body.right_wrist, nextFrame.body.right_wrist);
+        const mapToModel = (out, dv) => {
+          out.set(
+            _ikModelMid.x + (dv.x - _ikDataMid.x) * k,
+            _ikModelMid.y + (dv.y - _ikDataMid.y) * k,
+            _ikModelMid.z + (dv.z - _ikDataMid.z) * k,
+          );
+        };
+        mapToModel(_ikTargetW, _ikLerpW);
+        mapToModel(_ikTargetR, _ikLerpW2);
+
+        applySymmetryPrior(_ikTargetW, _ikTargetR, symmetryLambdaRef.current);
+        const twoHandedWeight = resolveTwoHanded(_ikTargetW, _ikTargetR);
+        clampToSigningSpace(_ikTargetW);
+        clampToSigningSpace(_ikTargetR);
+        pushOutOfTorso(_ikTargetW, torso);
+        pushOutOfTorso(_ikTargetR, torso);
+        pushOutOfHead(_ikTargetW, headGuard);
+        pushOutOfHead(_ikTargetR, headGuard);
+        if (twoHandedWeight > 0.5) lastTwoHandedRef.current = true;
+        else if (twoHandedWeight <= 0.01) lastTwoHandedRef.current = false;
 
         const applyArmIK = (isLeft) => {
           const shoulderBoneName = isLeft ? BONE_MAP.left_shoulder : BONE_MAP.right_shoulder;
@@ -421,23 +963,16 @@ export function Avatar({ signStream, onActiveWordChange }) {
             return;
           }
 
-          // lerped data-space anchors for this frame
-          lerpVec(_ikLerpS, dS, nS);
-          lerpVec(_ikLerpE, dE, nE);
-          lerpVec(_ikLerpW, dW, nW);
-
-          // rigid map data space -> model space, anchored on this side's shoulder
+          // rigid map data space -> model space, anchored on the midpoint, with
+          // the two-handed, torso and head passes already applied above. The
+          // wrist is still clamped to real bone reach inside solveArmIK, so
+          // unreachable frames tuck instead of flying.
           const S = isLeft ? ik.ls : ik.rs;
-          _ikTargetW.set(S.x + (_ikLerpW.x - _ikLerpS.x) * k,
-                         S.y + (_ikLerpW.y - _ikLerpS.y) * k,
-                         S.z + (_ikLerpW.z - _ikLerpS.z) * k);
-          _ikTargetE.set(S.x + (_ikLerpE.x - _ikLerpS.x) * k,
-                         S.y + (_ikLerpE.y - _ikLerpS.y) * k,
-                         S.z + (_ikLerpE.z - _ikLerpS.z) * k);
-
-          solveArmIK(S, _ikTargetE, _ikTargetW,
+          const target = isLeft ? _ikTargetW : _ikTargetR;
+          solveArmIK(S, target,
                      isLeft ? ik.lUpper : ik.rUpper,
                      isLeft ? ik.lFore : ik.rFore,
+                     isLeft,
                      _ikElbowWorld, _ikWristWorld);
 
           // upper arm: rotate its chain toward the solved elbow
@@ -481,17 +1016,12 @@ export function Avatar({ signStream, onActiveWordChange }) {
         const b = scene.getObjectByName(wristBoneName);
         if (!b) return;
 
-        if (!handData || !nextHandData || handData.length < 21) {
-            // STATE BLEEDING FIX: Reset wrist and fingers to neutral when tracking is lost
-            b.rotation.set(0, 0, 0);
-            
-            const prefix = isLeft ? 'LeftHand' : 'RightHand';
-            ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'].forEach(f => {
-                ['1', '2', '3'].forEach(j => {
-                    const fingerBone = scene.getObjectByName(`${prefix}${f}${j}`);
-                    if (fingerBone) fingerBone.rotation.set(0, 0, 0);
-                });
-            });
+        if (!handData || !nextHandData || handData.length < 21 || !handIsUsable(handData) || !handIsUsable(nextHandData)) {
+            // Tracking lost, or the recorded hand cloud is a degenerate flat
+            // line. Either way the bones are restored to the BIND pose rather
+            // than to identity: every hand bone on this GLB has a non-identity
+            // rest rotation, so rotation.set(0, 0, 0) twisted the hand.
+            restoreHandToBindPose(scene, isLeft, handRestQuat);
             return;
         }
 
@@ -570,17 +1100,8 @@ export function Avatar({ signStream, onActiveWordChange }) {
       applyWristRotation(false);
 
       // 2. Hand/Fingers - swing-twist per phalanx (locks roll, fixes crooked fingers)
-      // Pre-compute palm normals for this frame so all fingers on the same hand share one target
-      const palmTargetNorm = { left: null, right: null, leftNext: null, rightNext: null };
-      const computePalmNorm = (handData) => {
-        if (!handData || handData.length < 18) return null;
-        const p0 = new THREE.Vector3(), p5 = new THREE.Vector3(), p17 = new THREE.Vector3();
-        setVecDirect(p0, handData[0]); setVecDirect(p5, handData[5]); setVecDirect(p17, handData[17]);
-        const fwd = new THREE.Vector3().subVectors(p5, p0).normalize();
-        const across = new THREE.Vector3().subVectors(p5, p17).normalize();
-        const n = new THREE.Vector3();
-        return n;
-      };
+      // computePalmNorm() used to live here and was removed: it was never called
+      // and returned a zero vector it never populated.
       // left palm
       {
         const hd = frame.left_hand, nhd = nextFrame.left_hand;
@@ -623,8 +1144,12 @@ export function Avatar({ signStream, onActiveWordChange }) {
         const b = scene.getObjectByName(bone);
         if (!b) return;
         
-        if (!handData || !nextHandData || handData.length < 21) {
-            return; // Already reset in applyWristRotation
+        if (!handData || !nextHandData || handData.length < 21 || !handIsUsable(handData) || !handIsUsable(nextHandData)) {
+            // Already restored to the bind pose in applyWristRotation. Without
+            // this check the per-bone lengthSq() bail-out below would rotate
+            // some phalanges and skip others in the same frame, which is what
+            // renders as splayed, broken fingers.
+            return;
         }
 
         const defaultDir = fingerDefaultsRef.current[bone];

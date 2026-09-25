@@ -1,30 +1,25 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-import torch
-from faster_whisper import WhisperModel
-from utils.splitter import get_t5_model_and_tokenizer
-from routers import documents, media, stream, pose_import, text_input, database
+from routers import documents, media, stream, pose_import, text_input, database, sentence
+
+# Heavy models (Whisper, FLAN-T5) load lazily on first use via
+# utils.model_registry -- NOT in the lifespan. Loading them at startup blocked
+# the whole API for 10+ minutes (multi-GB downloads), and on networks where
+# HuggingFace file hosts are unreachable the server never came online at all.
+# Re-exported here so `from main import get_whisper_model` keeps working.
+from utils.model_registry import get_translator, get_whisper_model  # noqa: F401,E402
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Lifespan Startup: Detecting Device...")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device selected: {device}")
-    
-    compute_type = "int8_float16" if device == "cuda" else "int8"
-    
-    print("Loading WhisperModel...")
-    app.state.whisper_model = WhisperModel("large-v3", device=device, compute_type=compute_type)
-    print("WhisperModel loaded successfully.")
-    
-    print("Loading FLAN-T5 Pipeline...")
-    app.state.translator = get_t5_model_and_tokenizer()
-    print("FLAN-T5 Pipeline loaded successfully.")
-    
+    print("Lifespan Startup: models will load lazily on first use.", flush=True)
+    app.state.whisper_model = None
+    app.state.translator = None
+
     yield
-    
-    print("Lifespan Shutdown: Cleaning up models...")
+
+    print("Lifespan Shutdown: Cleaning up models...", flush=True)
     app.state.whisper_model = None
     app.state.translator = None
 
@@ -46,6 +41,7 @@ app.include_router(stream.router)
 app.include_router(pose_import.router)
 app.include_router(text_input.router)
 app.include_router(database.router)
+app.include_router(sentence.router)
 
 @app.get("/")
 async def root():

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { gsap } from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 
@@ -36,7 +36,7 @@ export function useSplitReveal(ref, { delay = 0, y = 90, rotate = 6, scramble = 
         gsap.set(chars, { opacity: 1 })
         return
       }
-      const tween = gsap.from(chars, {
+      gsap.from(chars, {
         yPercent: y,
         rotateZ: rotate,
         opacity: 0,

@@ -51,7 +51,7 @@ export function PublishModal({ open, signLabel, count, onCancel, onConfirm, busy
         aria-describedby="publish-dialog-description"
       >
         <div>
-          <p className="cyber-page__eyebrow !mb-2">Admin write // Shared Main</p>
+          <p className="ss-eyebrow !mb-2">Admin write // Shared Main</p>
           <h2 id="publish-dialog-title" className="m-0 text-2xl font-semibold uppercase text-[#FFB000]">
             Publish to everyone?
           </h2>

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
-import { DrawingUtils, HandLandmarker, PoseLandmarker } from "@mediapipe/tasks-vision";
+import { DrawingUtils, HandLandmarker } from "@mediapipe/tasks-vision";
 import { usePoseHandTracker } from "../hooks/usePoseHandTracker";
 import { CAMERA_CONSTRAINTS } from "../lib/camera";
 import { handColorFor, BODY_COLOR } from "../lib/handColors";
 import { normalizeSequence } from "../lib/normalize";
 import { VOCABULARY, TARGET_REPS_PER_SIGN } from "../lib/vocabulary";
-import { getAllWords, addCustomWord, removeCustomWord, syncCustomWordsWithDatabase } from "../lib/customWords";
+import { getAllWords, addCustomWord, removeCustomWord, syncCustomWordsWithDatabase, slugify } from "../lib/customWords";
 import {
   saveRecording,
   saveToLegacyFile,
@@ -15,6 +15,8 @@ import {
   syncSupabaseToLegacyFile,
   getCountsPerSign,
   getCountsSplit,
+  getMainSignSet,
+  isSignInMainSet,
   exportAllRecordingsAsFile,
   importRecordingsFromFile,
   clearAllRecordings,
@@ -52,6 +54,10 @@ export function RecordingTool() {
   const [mode, setMode] = useState("idle");
   const [countdownValue, setCountdownValue] = useState(null);
   const [liveHandCount, setLiveHandCount] = useState(0);
+  // Tracks per-hand visibility for the on-screen legend. The value is
+  // deliberately write-only here (nothing reads it yet); it exists so the
+  // per-frame update below never throws a ReferenceError.
+  const [, setLiveSeenHands] = useState({});
   const [pendingRecording, setPendingRecording] = useState(null); // { frames, handCounts }
   const [playToken, setPlayToken] = useState(0);
   const [counts, setCounts] = useState({});
@@ -69,6 +75,9 @@ export function RecordingTool() {
   const [showPublish, setShowPublish] = useState(false);
   const [publishBusy, setPublishBusy] = useState(false);
   const [splitCounts, setSplitCounts] = useState({ shared: {}, mine: {} });
+  // Upper-cased signIds owned by Shared Main. Non-admin takes for these words
+  // are blocked (hard Main-wins): Interpreter + avatar ignore them anyway.
+  const [mainSignSet, setMainSignSet] = useState(new Set());
 
   useEffect(() => {
     if (isAdmin) setSaveTarget("main");
@@ -103,6 +112,14 @@ export function RecordingTool() {
   function handleAddCustomWord() {
     const label = newWordLabel.trim();
     if (!label) return;
+    // Non-admin guard: a "new" word that already lives in Shared Main (same
+    // slug, case-insensitive) must not become a shadow custom entry.
+    if (!isAdmin && isSupabaseConfigured && isSignInMainSet(slugify(label), mainSignSet)) {
+      setSaveMessage(
+        `"${label.trim()}" is already in the Shared Main database. The Interpreter and the Translate avatar always use the admin version, so it cannot be added as a personal word.`
+      );
+      return;
+    }
     const created = addCustomWord(label);
     if (created) {
       // addCustomWord already wrote to localStorage synchronously, so refresh
@@ -156,7 +173,9 @@ export function RecordingTool() {
       refreshCounts();
       setImportMessage(
         `Imported ${result.imported} recording(s)` +
-          (result.skipped ? `, skipped ${result.skipped} invalid entr${result.skipped === 1 ? "y" : "ies"}.` : ".")
+          (result.skipped ? `, skipped ${result.skipped} invalid entr${result.skipped === 1 ? "y" : "ies"}` : "") +
+          (result.blockedMain ? `, blocked ${result.blockedMain} already in Shared Main` : "") +
+          "."
       );
     } catch (err) {
       setImportMessage(err.message || "Import failed.");
@@ -169,6 +188,7 @@ export function RecordingTool() {
       setCounts(latest);
       if (isSupabaseConfigured) {
         setSplitCounts(await getCountsSplit());
+        setMainSignSet(await getMainSignSet());
       }
     } catch (err) {
       console.warn("Backend count fetch failed:", err);
@@ -243,6 +263,13 @@ export function RecordingTool() {
           if (h[0].categoryName === "Left") leftHand = handResult.landmarks[i];
           if (h[0].categoryName === "Right") rightHand = handResult.landmarks[i];
         });
+        const nextLeft = !!leftHand;
+        const nextRight = !!rightHand;
+        setLiveSeenHands((prev) =>
+          prev.Left === nextLeft && prev.Right === nextRight
+            ? prev
+            : { Left: nextLeft, Right: nextRight },
+        );
 
         const canvas = canvasRef.current;
         if (canvas) {
@@ -450,7 +477,14 @@ export function RecordingTool() {
       return count;
     });
 
-    const result = normalizeSequence(rawFrames);
+    // The live frame aspect matters: MediaPipe scales x by width and y by
+    // height, so a non-square frame stretches the vertical axis relative to
+    // the horizontal one. See the header note in lib/normalize.js.
+    const v = videoRef.current;
+    const aspect = v && v.videoWidth > 0 && v.videoHeight > 0
+      ? v.videoWidth / v.videoHeight
+      : undefined;
+    const result = normalizeSequence(rawFrames, aspect);
     
     if (!result.normalized) {
       setSaveMessage("Discarded: Shoulders not visible enough to anchor the recording.");
@@ -472,14 +506,29 @@ export function RecordingTool() {
       return;
     }
 
-    await saveRecording({
-      signId: selectedSignId,
-      recordedBy: recordedBy.trim() || "Unknown",
-      conditionLabel: conditionLabel.trim() || "unspecified",
-      handCount: majorityHandCount(pendingRecording.handCounts),
-      frames: pendingRecording.frames,
-      recordedAt: Date.now(),
-    }, "mine");
+    // Hard Main-wins: a non-admin personal take for a Main-owned word is dead
+    // on arrival (Interpreter + avatar always play the admin golden), so block
+    // the save with a clear message instead of storing a shadow row.
+    if (!isAdmin && isSupabaseConfigured && isSignInMainSet(selectedSignId, mainSignSet)) {
+      setSaveMessage(
+        `"${selectedSign.label}" is already in the Shared Main database. The Interpreter and the Translate avatar always use the admin version, so this take was NOT saved. Add a genuinely new word to record something personal.`
+      );
+      return;
+    }
+
+    try {
+      await saveRecording({
+        signId: selectedSignId,
+        recordedBy: recordedBy.trim() || "Unknown",
+        conditionLabel: conditionLabel.trim() || "unspecified",
+        handCount: majorityHandCount(pendingRecording.handCounts),
+        frames: pendingRecording.frames,
+        recordedAt: Date.now(),
+      }, "mine");
+    } catch (err) {
+      setSaveMessage(err.message || "Save failed.");
+      return;
+    }
 
     setPendingRecording(null);
     setMode("idle");
@@ -541,18 +590,19 @@ export function RecordingTool() {
     }
   }
 
-  // Reverse bridge: pull Supabase (Main + My Space) into the localhost file so
-  // the Translate avatar can play them. Without this, words saved to My Space
-  // never reach the file-derived gloss and the avatar stands still. Admin only.
+  // Reverse bridge: pull Shared MAIN into the localhost file so the Translate
+  // avatar can play it. Personal My-Space takes are never synced: the avatar
+  // always plays the admin Main golden. Available to all signed-in users
+  // (local-file write is per-machine, no shared mutation).
   async function handleSyncSupabaseToFile() {
-    if (!confirm("Pull Supabase recordings (Main + My Space) into the localhost file for the avatar?")) return;
+    if (!confirm("Pull Shared Main recordings into the localhost file for the avatar?")) return;
     setSaveMessage("Syncing Supabase → localhost file…");
     try {
       const { imported, skipped } = await syncSupabaseToLegacyFile();
       setSaveMessage(
         imported === 0
-          ? "Nothing new. Every Supabase sign is already in the localhost file."
-          : `Synced ${imported} new sign(s) into the localhost file for the avatar.` +
+          ? "Nothing new. Every Shared Main sign is already in the localhost file."
+          : `Synced ${imported} new Shared Main sign(s) into the localhost file for the avatar.` +
             (skipped ? ` Skipped ${skipped} already present.` : "")
       );
       refreshCounts();
@@ -600,6 +650,11 @@ export function RecordingTool() {
   const handCountMismatch =
     mode === "idle" && cameraStatus === "ready" && liveHandCount !== expectedHands;
 
+  // Hard Main-wins for non-admins: the selected word already has an admin
+  // golden, so a personal take would never be shown anywhere.
+  const mainProtected =
+    !isAdmin && isSupabaseConfigured && isSignInMainSet(selectedSignId, mainSignSet);
+
   return (
     <div ref={rootRef} className="flex w-full max-w-6xl flex-col gap-6">
       <div className="cyber-recording-grid grid grid-cols-1 items-start gap-6 lg:grid-cols-[1.1fr_0.9fr]">
@@ -646,6 +701,14 @@ export function RecordingTool() {
             <div className="border border-[#FFB000] bg-black px-4 py-3 font-mono text-sm text-[#FFB000]" role="alert">
               "{selectedSign.label}" needs {expectedHands === 2 ? "both hands" : "one hand"} visible.
               Currently seeing {liveHandCount}. Adjust before recording.
+            </div>
+          )}
+
+          {mainProtected && (
+            <div className="border border-[#FFB000] bg-black px-4 py-3 font-mono text-sm text-[#FFB000]" role="alert">
+              "{selectedSign.label}" is already in the Shared Main database. The Interpreter and the
+              Translate avatar always play the admin version, so you cannot record or override it
+              from My Space. Add a genuinely new word to record something personal.
             </div>
           )}
 
@@ -772,6 +835,8 @@ export function RecordingTool() {
             counts={counts}
             splitCounts={splitCounts}
             isSupabaseConfigured={isSupabaseConfigured}
+            mainSignSet={mainSignSet}
+            isAdmin={isAdmin}
           />
 
           <div className="cyber-panel flex flex-col gap-3 p-4">
@@ -795,6 +860,11 @@ export function RecordingTool() {
                 </span>
               )}
             </span>
+            {mainProtected && (
+              <span className="font-mono text-xs text-[#FFB000]" role="note">
+                MAIN-LOCKED: personal takes for this word are never used. Interpreter + avatar always play Shared Main.
+              </span>
+            )}
             {deleteScopeCount > 0 && (
               <button
                 onClick={async () => {
@@ -825,7 +895,7 @@ export function RecordingTool() {
 
           {mode === "reviewing" && pendingRecording && (
             <div ref={reviewPanelRef} className="cyber-panel flex flex-col items-center gap-3 p-4">
-              <span className="cyber-page__eyebrow self-start !mb-0">Review take</span>
+              <span className="ss-eyebrow self-start !mb-0">Review take</span>
               <SkeletonPlayback frames={pendingRecording.frames} isPlaying={true} playToken={playToken} />
               <div className="flex flex-wrap justify-center gap-2">
                 <button
@@ -845,7 +915,9 @@ export function RecordingTool() {
                 </button>
                 <button
                   onClick={keepRecording}
-                  className="cyber-button cyber-button--complete"
+                  disabled={mainProtected}
+                  title={mainProtected ? "This word is already in Shared Main and cannot be overridden." : undefined}
+                  className="cyber-button cyber-button--complete disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {isAdmin && saveTarget === "main" ? "Publish to Everyone" : "Keep"}
                 </button>
@@ -901,7 +973,7 @@ export function RecordingTool() {
           {isSupabaseConfigured && (
             <button
               onClick={handleSyncSupabaseToFile}
-              title="Pull Supabase Main + My Space recordings into the localhost file so the Translate avatar can play them"
+              title="Pull Shared Main recordings into the localhost file so the Translate avatar can play them (personal takes are never synced)"
               className="cyber-button cyber-button--primary"
             >
               Sync Supabase → localhost file
@@ -949,6 +1021,8 @@ function SignPicker({
   counts,
   splitCounts,
   isSupabaseConfigured,
+  mainSignSet = new Set(),
+  isAdmin = false,
 }) {
   const categories = [...new Set(words.map((word) => word.category))];
 
@@ -968,12 +1042,15 @@ function SignPicker({
                   : totalCount;
                 const complete = mine >= TARGET_REPS_PER_SIGN;
                 const selected = word.id === selectedSignId;
+                const mainLocked =
+                  !isAdmin && isSupabaseConfigured && mainSignSet.has(String(word.id).toUpperCase());
 
                 return (
                   <button
                     key={word.id}
                     type="button"
                     onClick={() => onSelect(word.id)}
+                    title={mainLocked ? "Already in Shared Main. Interpreter and avatar always use the admin version; personal takes are blocked." : undefined}
                     className={`border px-3 py-2 text-left text-xs ${
                       selected
                         ? "border-[#FFB000] bg-[#FFB000] text-[#050505]"
@@ -982,10 +1059,15 @@ function SignPicker({
                           : "border-white/10 bg-black text-slate-300"
                     }`}
                   >
-                    <span className="block font-semibold">{word.label}</span>
+                    <span className="block font-semibold">{word.label}{mainLocked ? " 🔒" : ""}</span>
                     <span className="mt-1 block font-mono text-[10px] opacity-70">
                       {isSupabaseConfigured ? `SHARED ${shared} + YOURS ${mine}` : `${totalCount} REPS`}
                     </span>
+                    {mainLocked && (
+                      <span className="mt-1 block font-mono text-[10px] text-[#FFB000]">
+                        MAIN-LOCKED
+                      </span>
+                    )}
                   </button>
                 );
               })}

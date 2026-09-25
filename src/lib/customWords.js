@@ -20,7 +20,7 @@ function saveCustomWords(words) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(words));
 }
 
-function slugify(label) {
+export function slugify(label) {
   return label
     .trim()
     .toLowerCase()

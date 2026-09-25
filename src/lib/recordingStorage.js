@@ -19,6 +19,43 @@ async function getUser() {
   return data.session?.user ?? null;
 }
 
+async function isCurrentUserAdmin() {
+  if (!isSupabaseConfigured || !supabase) return false;
+  const user = await getUser();
+  if (!user) return false;
+  const { data } = await supabase
+    .from("profiles")
+    .select("is_admin")
+    .eq("id", user.id)
+    .maybeSingle();
+  return data?.is_admin === true;
+}
+
+// Upper-cased signIds present in Shared Main. Used to block non-admin
+// personal takes that would shadow an admin golden (same word, same or
+// different gesture): Interpreter + Translate always resolve overlaps to
+// Main, so saving them would only create dead rows.
+// Lightweight: selects sign_id only, never frames.
+export async function getMainSignSet() {
+  if (!isSupabaseConfigured || !supabase) return new Set();
+  try {
+    const { data, error } = await supabase.from("main_recordings").select("sign_id");
+    if (error) return new Set();
+    return new Set(
+      (data || [])
+        .map((r) => (typeof r.sign_id === "string" ? r.sign_id.toUpperCase() : null))
+        .filter(Boolean)
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+export function isSignInMainSet(signId, mainSet) {
+  if (!signId || !mainSet) return false;
+  return mainSet.has(String(signId).toUpperCase());
+}
+
 // ---------- legacy FastAPI helpers (pre-Supabase dev path) ----------
 async function legacySaveRecording(recording) {
   const res = await fetch(`${LEGACY_URL}/recordings`, {
@@ -49,16 +86,19 @@ export async function saveToLegacyFile(recording) {
   return legacySaveRecording({ ...recording });
 }
 
-// Reverse bridge: pull Supabase Main + my recordings into the localhost file
+// Reverse bridge: pull Shared MAIN recordings into the localhost file
 // so the Translate avatar (which plays the file-derived gloss_poses.json) can
-// sign words recorded in Supabase mode. Signs already present in the file
+// sign words recorded in Supabase mode. Personal My-Space takes are NEVER
+// imported: the avatar always plays the admin Main golden, so importing a
+// personal take for a word Main already has would only contaminate the file
+// gloss with a shadowed take. Signs already present in the file
 // (case-insensitive signId match) are skipped, so repeat runs never duplicate.
 // Requires the localhost backend (writes via /api/db/import, which rebuilds
 // the gloss automatically).
 export async function syncSupabaseToLegacyFile() {
   if (!isSupabaseConfigured || !supabase) throw new Error("Supabase is not configured yet.");
-  const [main, mine] = await Promise.all([getMainRecordings(), getMyRecordings()]);
-  const candidates = [...main, ...mine].filter(
+  const main = await getMainRecordings();
+  const candidates = main.filter(
     (r) => r && typeof r.signId === "string" && Array.isArray(r.frames) && r.frames.length > 0
   );
   let existing = [];
@@ -154,7 +194,8 @@ export async function getMyRecordings() {
   return (data || []).map(toAppShape);
 }
 
-// Merged view for the interpreter: main + mine (custom-first handled in libraryMerge).
+// Merged view for review/counts: main + mine (resolution order is Main-first,
+// enforced in libraryMerge for the Interpreter and server-side for Translate).
 export async function getAllRecordings() {
   if (!isSupabaseConfigured || !supabase) return legacyGetAll();
   const [main, mine] = await Promise.all([getMainRecordings(), getMyRecordings()]);
@@ -162,6 +203,10 @@ export async function getAllRecordings() {
 }
 
 // target: 'main' (admin only, RLS-enforced) | 'mine'
+// Non-admin saves to 'mine' are REJECTED when the word already exists in
+// Shared Main: the Interpreter and the avatar would ignore the personal take
+// anyway (hard Main-wins), so we refuse to create dead shadow rows. Admins
+// are exempt and can record anywhere.
 export async function saveRecording(recording, target = "mine") {
   if (!isSupabaseConfigured || !supabase) return legacySaveRecording(recording);
   const user = await getUser();
@@ -181,6 +226,18 @@ export async function saveRecording(recording, target = "mine") {
       .single();
     if (error) throw new Error(`Publish to Main failed: ${error.message}`);
     return toAppShape(data);
+  }
+  // Personal-space guard: refuse shadow rows for words Main already owns.
+  // Admins bypass (they can curate personal takes freely).
+  if (!(await isCurrentUserAdmin())) {
+    const mainSet = await getMainSignSet();
+    if (isSignInMainSet(recording.signId, mainSet)) {
+      throw new Error(
+        `MAIN_PROTECTED: "${recording.signId}" is already in the Shared Main database. ` +
+        `The Interpreter and the Translate avatar always use the admin version, so personal ` +
+        `takes for this word are not saved. Add a genuinely new word instead.`
+      );
+    }
   }
   const { data, error } = await supabase
     .from("user_recordings")
@@ -204,11 +261,24 @@ export async function deleteRecording(id) {
     if (!res.ok) throw new Error("Failed to delete recording");
     return { fileMirror: 0 };
   }
-  // PRD 05 dual-delete: remove from BOTH Supabase tables (RLS permits only the
-  // legal one), require at least one row actually removed, then best-effort
-  // mirror into the localhost file by content match (stores use different UUIDs).
+  // Non-admin callers may only touch their own My-Space rows: the Main delete
+  // is never even attempted, so a crafted id can never remove a shared golden
+  // (RLS would reject it anyway). Admins attempt both tables as before.
   const user = await getUser();
   if (!user) throw new Error("Sign in to delete recordings.");
+  const admin = await isCurrentUserAdmin();
+  if (!admin) {
+    const { data, error } = await supabase.from("user_recordings").delete().eq("id", id).eq("owner_id", user.id)
+      .select("id,sign_id,recorded_by,condition_label,hand_count,frame_count");
+    if (error) throw new Error("Failed to delete recording");
+    if (!data || data.length === 0) {
+      throw new Error("Nothing deleted. Shared Main recordings can only be removed by an admin.");
+    }
+    return { fileMirror: 0 };
+  }
+  // PRD 05 dual-delete (admin): remove from BOTH Supabase tables (RLS permits
+  // only the legal one), require at least one row actually removed, then
+  // best-effort mirror into the localhost file by content match.
   const [mine, main] = await Promise.all([
     supabase.from("user_recordings").delete().eq("id", id).eq("owner_id", user.id)
       .select("id,sign_id,recorded_by,condition_label,hand_count,frame_count"),
@@ -266,6 +336,9 @@ export async function deleteRecordingsForSign(signId, target = "mine") {
   }
   const user = await getUser();
   if (!user) throw new Error("Sign in required.");
+  if (target === "main" && !(await isCurrentUserAdmin())) {
+    throw new Error("Only admins can clear Shared Main recordings.");
+  }
   const table = target === "main" ? "main_recordings" : "user_recordings";
   let q = supabase.from(table).delete().eq("sign_id", signId);
   if (table === "user_recordings") q = q.eq("owner_id", user.id);
@@ -337,7 +410,26 @@ export async function importRecordingsFromFile(file, target = "mine") {
   const user = await getUser();
   if (!user) throw new Error("Sign in to import recordings.");
   const table = target === "main" ? "main_recordings" : "user_recordings";
-  const rows = toImport.map((r) => ({
+  // Personal imports must not create shadow rows for Main-owned words. Admins
+  // bypass; everyone else gets overlapping signs filtered out and reported.
+  let blockedMain = 0;
+  let importable = toImport;
+  if (table === "user_recordings" && !(await isCurrentUserAdmin())) {
+    const mainSet = await getMainSignSet();
+    importable = [];
+    for (const r of toImport) {
+      if (isSignInMainSet(r.signId, mainSet)) blockedMain++;
+      else importable.push(r);
+    }
+    if (importable.length === 0 && toImport.length > 0) {
+      throw new Error(
+        `MAIN_PROTECTED: all ${toImport.length} recording(s) in this file are for words already ` +
+        `in the Shared Main database. Nothing was imported. The Interpreter and the avatar ` +
+        `always use the admin versions.`
+      );
+    }
+  }
+  const rows = importable.map((r) => ({
     ...(table === "user_recordings" ? { owner_id: user.id } : { created_by: user.id }),
     sign_id: r.signId,
     recorded_by: r.recordedBy || user.email || "Unknown",
@@ -347,7 +439,7 @@ export async function importRecordingsFromFile(file, target = "mine") {
   }));
   const { error } = await supabase.from(table).insert(rows);
   if (error) throw new Error(`Import failed: ${error.message}`);
-  return { imported: rows.length, skipped, total: recordings.length };
+  return { imported: rows.length, skipped, blockedMain, total: recordings.length };
 }
 
 export async function exportAllRecordingsAsFile() {

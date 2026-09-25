@@ -45,16 +45,26 @@ async def translate_and_generate_poses(text_chunk: str, translator):
     Asynchronous generator that processes a text chunk, translates to gloss,
     looks up pre-recorded frames from the database, and yields payloads.
     """
-    # Run the translation model inference with concurrency limit
-    await t5_semaphore.acquire()
-    async def _do_inference():
+    # Run the translation model inference with concurrency limit.
+    # If no translator is available (model not cached and undownloadable),
+    # fall back to the input words directly so the stream keeps working --
+    # pose lookup and fingerspelling still animate from the local databases.
+    if translator is None:
+        gloss_text = ""
+    else:
+        await t5_semaphore.acquire()
+        async def _do_inference():
+            try:
+                return await asyncio.to_thread(t5_translate, text_chunk, translator)
+            finally:
+                t5_semaphore.release()
+
+        worker = asyncio.create_task(_do_inference())
         try:
-            return await asyncio.to_thread(t5_translate, text_chunk, translator)
-        finally:
-            t5_semaphore.release()
-            
-    worker = asyncio.create_task(_do_inference())
-    gloss_text = await asyncio.shield(worker)
+            gloss_text = await asyncio.shield(worker)
+        except Exception as e:
+            print(f"[ai_pipeline] translation failed ({e}); using input words directly.")
+            gloss_text = ""
     gloss_text = gloss_text.strip()
     words = gloss_text.split()
     
@@ -63,6 +73,10 @@ async def translate_and_generate_poses(text_chunk: str, translator):
         words = text_chunk.strip().upper().split()
         
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Hard Main-wins: gloss_db is rebuilt exclusively from Shared Main
+    # (routers.database.load_source_recordings reads main_recordings only when
+    # Supabase is configured). Personal My-Space takes never enter this lookup,
+    # so overlapping words always play the admin golden on the Translate tab.
     gloss_db = load_json(os.path.join(BASE_DIR, "gloss_poses.json"))
     fingerspell_db = load_json(os.path.join(BASE_DIR, "fingerspell_poses.json"))
     
