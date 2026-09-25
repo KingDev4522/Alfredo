@@ -2,18 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
 import { DrawingUtils, HandLandmarker } from "@mediapipe/tasks-vision";
-import { ArrowsOut } from "@phosphor-icons/react/dist/icons/ArrowsOut";
+import {
+  ArrowsClockwise,
+  ArrowsOut,
+  Copy,
+  Eye,
+  EyeSlash,
+  FileText,
+  Gear,
+  Play,
+  SpeakerHigh,
+  Trash,
+  Waveform,
+} from "@phosphor-icons/react";
 import { BorderBeam } from "border-beam";
-import { ArrowsClockwise } from "@phosphor-icons/react/dist/icons/ArrowsClockwise";
-import { Eye } from "@phosphor-icons/react/dist/icons/Eye";
-import { EyeSlash } from "@phosphor-icons/react/dist/icons/EyeSlash";
-import { Waveform } from "@phosphor-icons/react/dist/icons/Waveform";
-import { FileText } from "@phosphor-icons/react/dist/icons/FileText";
-import { SpeakerHigh } from "@phosphor-icons/react/dist/icons/SpeakerHigh";
-import { Copy } from "@phosphor-icons/react/dist/icons/Copy";
-import { Trash } from "@phosphor-icons/react/dist/icons/Trash";
-import { Gear } from "@phosphor-icons/react/dist/icons/Gear";
-import { Play } from "@phosphor-icons/react/dist/icons/Play";
 import { usePoseHandTracker } from "../hooks/usePoseHandTracker";
 import { CAMERA_CONSTRAINTS } from "../lib/camera";
 import { handColorFor, BODY_COLOR } from "../lib/handColors";

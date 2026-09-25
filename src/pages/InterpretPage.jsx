@@ -1,10 +1,7 @@
 import { useRef } from "react";
 import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
-import { Hand } from "@phosphor-icons/react/dist/icons/Hand";
-import { Lightning } from "@phosphor-icons/react/dist/icons/Lightning";
-import { Monitor } from "@phosphor-icons/react/dist/icons/Monitor";
-import { ShieldCheck } from "@phosphor-icons/react/dist/icons/ShieldCheck";
+import { Hand, Lightning, Monitor, ShieldCheck } from "@phosphor-icons/react";
 import { LiveInterpreter } from "../components/LiveInterpreter";
 
 gsap.registerPlugin(useGSAP);

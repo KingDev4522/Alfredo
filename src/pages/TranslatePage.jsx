@@ -1,10 +1,7 @@
 import { useRef } from "react";
 import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
-import { FileText } from "@phosphor-icons/react/dist/icons/FileText";
-import { Cube } from "@phosphor-icons/react/dist/icons/Cube";
-import { Cpu } from "@phosphor-icons/react/dist/icons/Cpu";
-import { Broadcast } from "@phosphor-icons/react/dist/icons/Broadcast";
+import { Broadcast, Cpu, Cube, FileText } from "@phosphor-icons/react";
 import { MediaInterpreter } from "../components/MediaInterpreter";
 
 gsap.registerPlugin(useGSAP);
