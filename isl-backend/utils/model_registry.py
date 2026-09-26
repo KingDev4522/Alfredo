@@ -21,11 +21,9 @@ This module loads each model on first use and caches it on ``app.state``:
 
 import os
 import threading
+from typing import Any
 
-import torch
-from faster_whisper import WhisperModel
 from huggingface_hub import hf_hub_download
-from transformers import AutoTokenizer
 
 from utils.splitter import get_t5_model_and_tokenizer
 
@@ -53,12 +51,22 @@ def _whisper_repo_id(name: str) -> str:
     return name if "/" in name else WHISPER_REPO_PREFIX + name
 
 
-def get_whisper_model(app) -> WhisperModel:
+def get_whisper_model(app) -> Any:
     """Return the shared WhisperModel, loading it on first call.
 
     Raises ModelUnavailableError immediately if the model is not cached
-    locally, instead of hanging on an uncompletable download.
+    locally, instead of hanging on an uncompletable download. Also raises
+    ModelUnavailableError when torch/faster-whisper are not installed, so
+    the backend still starts and YouTube transcription reports unavailable.
     """
+    try:
+        import torch
+        from faster_whisper import WhisperModel
+    except ImportError as e:
+        raise ModelUnavailableError(
+            f"Whisper dependencies are not installed ({e}). "
+            f"Install torch + faster-whisper to enable YouTube transcription."
+        )
     if app.state.whisper_model is None:
         with _whisper_lock:
             if app.state.whisper_model is None:
@@ -96,8 +104,16 @@ def get_translator(app):
         with _translator_lock:
             if app.state.translator is None:
                 try:
+                    from transformers import AutoTokenizer
+
                     AutoTokenizer.from_pretrained(
                         T5_MODEL_ID, local_files_only=True
+                    )
+                except ImportError as e:
+                    raise ModelUnavailableError(
+                        f"transformers/torch are not installed ({e}). "
+                        f"Text-to-gloss translation is unavailable; pose "
+                        f"lookup falls back to the input words."
                     )
                 except Exception:
                     raise ModelUnavailableError(
@@ -106,6 +122,12 @@ def get_translator(app):
                         f"unavailable; pose lookup falls back to the input words."
                     )
                 print("Loading FLAN-T5 Pipeline...", flush=True)
-                app.state.translator = get_t5_model_and_tokenizer()
+                try:
+                    app.state.translator = get_t5_model_and_tokenizer()
+                except (ImportError, ModuleNotFoundError) as e:
+                    raise ModelUnavailableError(
+                        f"FLAN-T5 dependencies are not installed ({e}). "
+                        f"Pose lookup falls back to the input words."
+                    )
                 print("FLAN-T5 Pipeline loaded successfully.", flush=True)
     return app.state.translator
