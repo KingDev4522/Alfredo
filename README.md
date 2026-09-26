@@ -2,6 +2,8 @@
 
 **Your hands have a voice now.**
 
+![Alfredo hero](public/alfredo-hero.png)
+
 Alfredo is an on-device Indian Sign Language interpreter. Point a webcam at a signer and it tracks hands, recognizes signs, builds sentences, and speaks them. All in the browser.
 
 Live: `https://alfredo-seven.vercel.app`
