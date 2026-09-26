@@ -16,6 +16,18 @@ export function LoginPage() {
   const [email, setEmail] = useState("");
   const [linkSent, setLinkSent] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Signup/login throttling: magic-link resends are Supabase-billed and
+  // rate-limited server-side. Client enforces a 60s cooldown between sends
+  // so rapid clicking can't email-bomb an address (or burn the quota).
+  const RESEND_COOLDOWN_MS = 60000;
+  const [resendAt, setResendAt] = useState(0);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!linkSent) return undefined;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [linkSent]);
+  const resendWaitS = Math.max(0, Math.ceil((resendAt - nowTick) / 1000));
   const [canGoBack, setCanGoBack] = useState(false);
   // Reason the callback route bounced here, if it did. Cleared on the next
   // attempt so a stale message never sits under a fresh form.
@@ -72,10 +84,16 @@ export function LoginPage() {
       setError("Type your email first.");
       return;
     }
+    if (Date.now() < resendAt) {
+      setError(`Wait ${Math.ceil((resendAt - Date.now()) / 1000)}s before requesting another link.`);
+      return;
+    }
     setBusy(true);
     try {
       await signInWithEmailLink(email);
       setLinkSent(true);
+      setResendAt(Date.now() + RESEND_COOLDOWN_MS);
+      setNowTick(Date.now());
     } catch (authError) {
       setError(authError?.message || "Could not send the login link.");
     } finally {
@@ -137,16 +155,26 @@ export function LoginPage() {
                 <span className="text-neutral-100">{email.trim()}</span>. Open it on this
                 device to enter the studio.
               </p>
-              <button
-                type="button"
-                onClick={() => {
-                  setLinkSent(false);
-                  setError("");
-                }}
-                className="mt-4 text-[13px] font-semibold text-white underline-offset-4 hover:underline"
-              >
-                Use a different email
-              </button>
+              <div className="mt-4 flex flex-wrap items-center gap-4">
+                <button
+                  type="button"
+                  onClick={handleEmailLink}
+                  disabled={busy || resendWaitS > 0}
+                  className="text-[13px] font-semibold text-white underline-offset-4 hover:underline disabled:cursor-not-allowed disabled:opacity-40 disabled:no-underline"
+                >
+                  {busy ? "Sending…" : resendWaitS > 0 ? `Resend link in ${resendWaitS}s` : "Resend link"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLinkSent(false);
+                    setError("");
+                  }}
+                  className="text-[13px] font-semibold text-white underline-offset-4 hover:underline"
+                >
+                  Use a different email
+                </button>
+              </div>
             </div>
           ) : (
             <form onSubmit={handleEmailLink} className="mt-8">

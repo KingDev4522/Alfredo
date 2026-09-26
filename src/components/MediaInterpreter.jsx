@@ -5,6 +5,7 @@ import { useSignStream } from '../hooks/useSignStream';
 import { API_BASE_URL } from '../lib/supabaseClient';
 import { Avatar } from './Avatar';
 import { useAuth } from '../hooks/useAuth';
+import { PanelGlow } from './PanelGlow';
 
 /*
  * Framing for the avatar stage.
@@ -369,8 +370,16 @@ export function MediaInterpreter() {
 
 
 
+  /*
+   * lg:gap-12 is the point of the root grid. The stage and the work column
+   * are two separate instruments, not two halves of one card, and at the
+   * default 20px gutter the avatar read as part of the control stack. 48px
+   * on desktop gives the model its own space; gap-6 still applies when the
+   * columns stack on narrow screens. The column ratio is left at 1.12/0.88
+   * so the stage framing is unchanged.
+   */
   return (
-      <div className="ref-page relative grid w-full grid-cols-1 items-start gap-5 lg:grid-cols-[1.12fr_0.88fr]">
+      <div className="ref-page relative grid w-full grid-cols-1 items-start gap-6 lg:grid-cols-[1.12fr_0.88fr] lg:gap-12">
 
 
       {/* Global Toast Notification */}
@@ -390,9 +399,12 @@ export function MediaInterpreter() {
 
       {/* Visual column: 3D avatar stage */}
       <div className="flex flex-col gap-4 lg:sticky lg:top-24 min-w-0">
-      {/* Avatar stage. Not a drop target: see the note by the file input. */}
+      {/* Avatar stage. Not a drop target: see the note by the file input.
+          gi-stage pins this panel back to solid black in index.css so the
+          glass pass does not repaint the WebGL viewport. Nothing inside the
+          Canvas is touched. */}
       <div
-        className="ref-panel relative min-h-[340px] w-full overflow-hidden bg-black sm:min-h-[420px] lg:h-[62vh] lg:aspect-auto lg:min-h-0"
+        className="ref-panel gi-stage relative min-h-[340px] w-full overflow-hidden bg-black sm:min-h-[420px] lg:h-[62vh] lg:aspect-auto lg:min-h-0"
       >
 
         <Canvas
@@ -518,17 +530,28 @@ export function MediaInterpreter() {
       </div>
 
       {/* Content column: context, transcript, pipeline, controls */}
-      <div className="flex flex-col gap-4 min-w-0">
+      {/*
+        gap-5, not gap-4. These four cards carry the densest content on the
+        page — three form rows, a progress meter and a five-state rail — and
+        at 16px the stack read as one block with hairline seams rather than
+        as separate cards. The column also got a little wider: 0.96fr
+        against the stage's 1.04fr, which is enough to stop the input rows
+        from being squeezed without meaningfully re-framing the avatar.
+      */}
+      <div className="flex flex-col gap-5 min-w-0">
       {/* Original Input Context Panel */}
       {jobContext && (
-        <div className="ref-panel flex min-h-[68px] w-full flex-col justify-center p-5">
-          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Original Input Context</h3>
-          <p className="text-slate-200 text-lg leading-snug">{jobContext}</p>
-        </div>
+        <PanelGlow className="gi-glow--center min-h-[68px]">
+          <div className="flex flex-col justify-center p-5 sm:p-6">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Original Input Context</h3>
+            <p className="text-slate-200 text-lg leading-snug">{jobContext}</p>
+          </div>
+        </PanelGlow>
       )}
 
       {/* Sentence Accumulator Panel */}
-      <div className="ref-panel min-h-[80px] w-full p-5">
+      <PanelGlow>
+      <div className="min-h-[96px] w-full p-5 sm:p-6">
         <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Live Transcript</h3>
         <div className="flex flex-wrap gap-x-2 gap-y-3">
           {sentence.map((item, index) => {
@@ -552,9 +575,11 @@ export function MediaInterpreter() {
           {sentence.length === 0 && <span className="text-slate-600 text-xl font-medium italic">Waiting for translation...</span>}
         </div>
       </div>
+      </PanelGlow>
 
       {/* UX State Machine & Pipeline Progress */}
-      <div className="ref-panel flex flex-col gap-3 p-5">
+      <PanelGlow>
+      <div className="flex flex-col gap-4 p-5 sm:p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
           <div className="flex-1">
             <div className="flex justify-between text-xs text-slate-400 mb-1">
@@ -570,7 +595,7 @@ export function MediaInterpreter() {
               aria-valuenow={signStream.progress}
             >
               <div 
-                className="h-full bg-[#FFB000] transition-all duration-300"
+                className="gi-bar-amber h-full bg-[#FFB000] transition-all duration-300"
                 style={{ width: `${signStream.progress}%` }}
               />
             </div>
@@ -582,18 +607,20 @@ export function MediaInterpreter() {
         </div>
         
         {/* State Machine Status Bar */}
-        <div className="grid w-full grid-cols-2 gap-2 border-t border-[var(--ref-line)] pt-3 sm:grid-cols-5">
+        <div className="grid w-full grid-cols-2 gap-x-3 gap-y-2 border-t border-[var(--ref-line)] pt-4 sm:grid-cols-5">
           {['idle', 'uploading', 'transcribing', 'translating', 'streaming'].map((state) => (
              <div key={state} className={`flex items-center gap-2 text-xs font-bold uppercase tracking-wider ${processState === state ? 'text-[#55F6E5] drop-shadow-[0_0_5px_rgba(85,246,229,0.5)]' : 'text-slate-600'}`}>
                 <div className={`w-2 h-2 rounded-full ${processState === state ? 'bg-[#55F6E5] shadow-[0_0_8px_#55F6E5]' : 'bg-slate-700'}`} />
-                {state}
-             </div>
+                 {state}
+              </div>
           ))}
         </div>
       </div>
+      </PanelGlow>
 
       {/* Controls */}
-      <div className="ref-panel flex flex-col gap-4 p-5">
+      <PanelGlow>
+      <div className="flex flex-col gap-5 p-5 sm:p-6">
         
         {isAdmin && (
           <div className="flex flex-col justify-between gap-3 border border-[#FFB000]/35 bg-black p-3 sm:flex-row sm:items-center">
@@ -621,11 +648,11 @@ export function MediaInterpreter() {
           </div>
         )}
 
-        <form onSubmit={handleYoutubeSubmit} className="grid gap-2">
+        <form onSubmit={handleYoutubeSubmit} className="grid gap-3">
           <label className="cyber-login__label" htmlFor="youtube-url">
             YouTube source
           </label>
-          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
             <input
               id="youtube-url"
               type="url"
@@ -646,11 +673,11 @@ export function MediaInterpreter() {
           </div>
         </form>
 
-        <form onSubmit={handleTextSubmit} className="mt-2 grid gap-2">
+        <form onSubmit={handleTextSubmit} className="grid gap-3">
           <label className="cyber-login__label" htmlFor="translation-text">
             Text input // Ctrl+Enter to submit
           </label>
-          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
             <textarea
               id="translation-text"
               placeholder="Enter text to translate"
@@ -672,8 +699,7 @@ export function MediaInterpreter() {
                 aria-pressed={isListening}
               >
                 {isListening ? "Listening" : "Dictate"}
-              </button>
-              <button
+              </button>              <button
                 type="submit"
                 disabled={isBusy || !textContent}
                 className="ref-btn ref-btn--primary"
@@ -684,11 +710,11 @@ export function MediaInterpreter() {
           </div>
         </form>
 
-        <div className="mt-2 grid gap-2">
+        <div className="grid gap-3">
           <label className="cyber-login__label" htmlFor="translation-file">
             Media or document input
           </label>
-          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
             <input
               id="translation-file"
               type="file"
@@ -712,6 +738,7 @@ export function MediaInterpreter() {
           </span>
         </div>
       </div>
+      </PanelGlow>
       </div>
 
     </div>

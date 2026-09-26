@@ -15,7 +15,6 @@ import {
   Trash,
   Waveform,
 } from "@phosphor-icons/react";
-import { BorderBeam } from "border-beam";
 import { usePoseHandTracker } from "../hooks/usePoseHandTracker";
 import { CAMERA_CONSTRAINTS } from "../lib/camera";
 import { handColorFor, BODY_COLOR } from "../lib/handColors";
@@ -25,14 +24,20 @@ import {
   buildTemplateLibrary,
   classifySequence,
   fingertipWeighted,
-  CONFIDENCE_THRESHOLD,
+  thresholdFor,
 } from "../lib/recognizer";
 import { buildMergedLibrary, classifyWithPriority } from "../lib/libraryMerge";
+import {
+  STATIC_EVERY_N_FRAMES,
+  matchStaticLiveFrame,
+  splitStaticMotion,
+} from "../lib/staticMatch";
 import { getAllRecordings, getMainRecordings, getMyRecordings } from "../lib/recordingStorage";
 import { isSupabaseConfigured } from "../lib/supabaseClient";
 import { getAllWords, syncCustomWordsWithDatabase } from "../lib/customWords";
 import { buildSpokenPhrases, phrasesToSpeechText } from "../lib/sentenceGrammar";
 import { buildSpokenPhrasesWithAI, translateToHindi } from "../lib/sentenceAI";
+import { PanelGlow } from "./PanelGlow";
 
 gsap.registerPlugin(useGSAP);
 
@@ -48,6 +53,11 @@ gsap.registerPlugin(useGSAP);
 // signs doesn't falsely trigger it, short enough it doesn't feel laggy.
 const HANDS_ABSENT_SPEAK_MS = 900;
 
+// Static fast-path (PRD 18) runs on RAW live frames normalized one at a
+// time; motion DTW runs on trimmed segments. Cooldown stops a held static
+// pose from re-firing every 6th frame.
+const STATIC_ACCEPT_COOLDOWN_MS = 1500;
+
 export function LiveInterpreter() {
   const [allWords, setAllWords] = useState(() => getAllWords());
   const signLabelById = Object.fromEntries(allWords.map((w) => [w.id, w.label]));
@@ -57,6 +67,13 @@ export function LiveInterpreter() {
   const canvasRef = useRef(null);
   const frameCallbackId = useRef(null);
   const segmenterRef = useRef(null);
+  // PRD 18 split: static takes answer from a single frame (instant);
+  // motion takes go through DTW exactly as before. Refs (not state) so the
+  // per-frame loop always reads the latest without re-subscribing.
+  const staticIndexRef = useRef([]);
+  const motionLibraryRef = useRef(null);
+  const staticFrameCounterRef = useRef(0);
+  const lastStaticAcceptRef = useRef(0);
   const handsAbsentSinceRef = useRef(null);
   const hasTriggeredSpeechForAbsenceRef = useRef(false);
   const sentenceWordsRef = useRef([]);
@@ -72,15 +89,6 @@ export function LiveInterpreter() {
   const [templateCount, setTemplateCount] = useState(0);
   // Overlay toggle, wired to the canvas draw below.
   const [showLandmarks, setShowLandmarks] = useState(true);
-  // BorderBeam is continuous motion, so it must honour the OS setting.
-  const [reduceMotion, setReduceMotion] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const sync = () => setReduceMotion(mq.matches);
-    sync();
-    mq.addEventListener("change", sync);
-    return () => mq.removeEventListener("change", sync);
-  }, []);
 
   const [liveStatus, setLiveStatus] = useState("watching"); // watching | capturing | recognized | rejected
   const [bufferedMs, setBufferedMs] = useState(0);
@@ -101,17 +109,40 @@ export function LiveInterpreter() {
         // golden (see libraryMerge.classifyWithPriority). Personal takes only
         // cover novel words Main cannot match.
         const [main, mine] = await Promise.all([getMainRecordings(), getMyRecordings()]);
-        setTemplateLibrary(buildMergedLibrary(main, mine));
+        const merged = buildMergedLibrary(main, mine);
+        setTemplateLibrary(merged);
         setTemplateCount(main.length + mine.length);
+        // PRD 18: static takes leave the DTW library — they answer instantly
+        // from a single frame instead. Old rows without a flag count as motion.
+        const split = splitStaticMotion(merged);
+        staticIndexRef.current = split.staticIndex;
+        motionLibraryRef.current = split.motionLibrary;
       } else {
         const recordings = await getAllRecordings();
-        setTemplateLibrary(buildTemplateLibrary(recordings));
+        const lib = buildTemplateLibrary(recordings);
+        setTemplateLibrary(lib);
         setTemplateCount(recordings.length);
+        const split = splitStaticMotion(lib);
+        staticIndexRef.current = split.staticIndex;
+        motionLibraryRef.current = split.motionLibrary;
       }
     } catch (err) {
       console.error("Failed to load templates (backend might be offline):", err);
       setTemplateLibrary(buildTemplateLibrary([]));
       setTemplateCount(0);
+      staticIndexRef.current = [];
+      motionLibraryRef.current = null;
+    }
+  }
+
+  // Shared accept path for static (single-frame) and motion (DTW) hits:
+  // recognized UI + no-repeat sentence guard live in one place.
+  function acceptWord(signId, confidence, source) {
+    setLiveStatus("recognized");
+    setLiveWord({ signId, confidence, source });
+    const lastWord = sentenceWordsRef.current[sentenceWordsRef.current.length - 1];
+    if (signId !== lastWord) {
+      setSentenceWords((prev) => [...prev, signId]);
     }
   }
 
@@ -199,26 +230,22 @@ export function LiveInterpreter() {
         return;
       }
 
+      // Motion path: DTW searches MOTION takes only. Static takes were split
+      // out at load (PRD 18) — they already answered instantly frame-by-frame.
       // Hard Main-wins when merged library present, else legacy path.
-      // All templates (motion or still, 1-hand or 2-hand) participate; nothing is excluded.
-      const isMerged = templateLibrary && templateLibrary.user && templateLibrary.main;
+      const motionLib = motionLibraryRef.current || templateLibrary;
+      const isMerged = motionLib && motionLib.user && motionLib.main;
       const result = isMerged
-        ? classifyWithPriority(normalizationResult.frames, templateLibrary, {
+        ? classifyWithPriority(normalizationResult.frames, motionLib, {
             landmarkWeight: fingertipWeighted,
-            threshold: CONFIDENCE_THRESHOLD,
+            threshold: thresholdFor,
           })
-        : classifySequence(normalizationResult.frames, templateLibrary, {
+        : classifySequence(normalizationResult.frames, motionLib, {
             landmarkWeight: fingertipWeighted,
           });
 
-      if (result.signId && result.confidence >= CONFIDENCE_THRESHOLD) {
-        setLiveStatus("recognized");
-        setLiveWord({ signId: result.signId, confidence: result.confidence, source: result.source });
-
-        const lastWord = sentenceWordsRef.current[sentenceWordsRef.current.length - 1];
-        if (result.signId !== lastWord) {
-          setSentenceWords((prev) => [...prev, result.signId]);
-        }
+      if (result.signId && result.confidence >= thresholdFor(result.signId)) {
+        acceptWord(result.signId, result.confidence, result.source);
         return;
       }
 
@@ -340,6 +367,34 @@ export function LiveInterpreter() {
           right_hand: rightHand
         };
 
+        // PRD 18 static fast-path: ONE live frame vs static takes, Main-first.
+        // Throttled to every Nth frame; single-frame normalize matches the
+        // same torso-anchored space templates live in. On hit: accept now,
+        // reset the segmenter so motion DTW doesn't double-report the hold.
+        staticFrameCounterRef.current += 1;
+        if (
+          staticIndexRef.current.length > 0 &&
+          (leftHand || rightHand) &&
+          staticFrameCounterRef.current % STATIC_EVERY_N_FRAMES === 0 &&
+          nowMs - lastStaticAcceptRef.current >= STATIC_ACCEPT_COOLDOWN_MS
+        ) {
+          const vStatic = videoRef.current;
+          const aspectStatic =
+            vStatic && vStatic.videoWidth > 0 && vStatic.videoHeight > 0
+              ? vStatic.videoWidth / vStatic.videoHeight
+              : undefined;
+          const single = normalizeSequence([frameObj], aspectStatic);
+          if (single.normalized && single.frames.length > 0) {
+            const hit = matchStaticLiveFrame(single.frames[0], staticIndexRef.current);
+            if (hit) {
+              lastStaticAcceptRef.current = nowMs;
+              acceptWord(hit.signId, hit.ratio, hit.source);
+              segmenterRef.current.reset();
+              setBufferedMs(0);
+            }
+          }
+        }
+
         const segEvent = segmenterRef.current.pushFrame(frameObj, nowMs);
         if (segEvent.event === "segment-ready") {
           // FIRE-AND-FORGET: Does not block the frame loop
@@ -402,8 +457,15 @@ export function LiveInterpreter() {
     // and auto-sentences are on, ask the backend AI (Groq -> Gemini
     // fallbacks); on any failure the grammar result is spoken unchanged.
     let phrases;
+    let corrections = [];
     if (autoGrammarEnabledRef.current) {
-      ({ phrases } = await buildSpokenPhrasesWithAI(current, { autoGrammar: true }));
+      // allWords carry {id,label} — the backend uses them (plus the fixed
+      // vocabulary) to complete partial letter strings before the LLM.
+      const knownWords = allWords.map((w) => ({ id: w.id, label: w.label }));
+      ({ phrases, corrections = [] } = await buildSpokenPhrasesWithAI(current, {
+        autoGrammar: true,
+        knownWords,
+      }));
     } else {
       phrases = buildSpokenPhrases(current, { autoGrammar: false });
     }
@@ -435,11 +497,18 @@ export function LiveInterpreter() {
 
     // Sub-Phase 2B: Push to persistent transcript history before clearing.
     // Stores what was actually spoken (Hindi when the toggle was on).
+    // When the backend completed partial letters, keep a one-line note so
+    // the user sees what was heard ("watr" -> "water").
+    const correctionNote =
+      corrections.length > 0
+        ? `Heard as: ${corrections.map((c) => `"${c.from}" → "${c.to}"`).join(", ")}`
+        : null;
     setTranscriptHistory((prev) => [
       ...prev,
       {
         id: Date.now(),
         text: spokenText,
+        note: correctionNote,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       }
     ]);
@@ -520,7 +589,7 @@ export function LiveInterpreter() {
   return (
     <div
       ref={rootRef}
-      className="ref-page cyber-interpreter-grid grid w-full grid-cols-1 items-start gap-5 lg:grid-cols-[1.12fr_0.88fr]"
+      className="ref-page cyber-interpreter-grid grid w-full grid-cols-1 gap-5 lg:grid-cols-[1.28fr_0.72fr]"
     >
       {/* Visual column: camera + load notices */}
       <div className="flex flex-col gap-3 lg:sticky lg:top-24">
@@ -533,7 +602,7 @@ export function LiveInterpreter() {
           head. The video uses object-cover, so the aspect change crops rather
           than distorts.
         */}
-        <div className="ref-panel relative aspect-[4/3] w-full overflow-hidden bg-[#0b0a09] sm:aspect-video lg:aspect-[16/10]">
+        <div className="ref-panel gi-stage relative aspect-[4/3] w-full overflow-hidden bg-[#0b0a09] sm:aspect-video lg:aspect-[16/10]">
           <video
             ref={videoRef}
             autoPlay
@@ -544,21 +613,11 @@ export function LiveInterpreter() {
           <canvas ref={canvasRef} className="absolute inset-0 w-full h-full -scale-x-100" />
 
           {isSpeaking && (
-            <div className="absolute right-3 top-3 flex items-center gap-2 rounded-full border border-white/15 bg-[#100f0d]/75 px-3 py-1.5 backdrop-blur-md">
+            <div className="gi-overlay-pill absolute right-3 top-3 flex items-center gap-2 rounded-full border border-white/15 bg-[#100f0d]/75 px-3 py-1.5 backdrop-blur-md">
               <span className="h-1.5 w-1.5 rounded-full bg-[var(--ref-live)]" />
               <span className="font-mono text-[11px] text-white">Speaking</span>
             </div>
           )}
-
-          {/* Camera state, as a pill, top-left. */}
-          <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full border border-white/15 bg-[#100f0d]/75 px-3 py-1.5 backdrop-blur-md">
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${cameraStatus === "ready" ? "bg-[var(--ref-live)]" : "bg-[var(--ref-faint)]"}`}
-            />
-            <span className="font-mono text-[11px] text-white">
-              {cameraStatus === "ready" ? "Camera active" : "Starting camera"}
-            </span>
-          </div>
 
           {/* Capture tools, bottom-left, matching the reference. */}
           <div className="absolute bottom-3 left-3 flex items-center gap-2">
@@ -616,11 +675,12 @@ export function LiveInterpreter() {
       {/* Content column: status, sentence, transcript, controls */}
       <div className="flex min-w-0 flex-col gap-4">
       {/* Live recognition status */}
-      <div
-        className="ref-panel flex min-h-[5.5rem] flex-col justify-center gap-2 p-5"
+      <PanelGlow
+        className="gi-glow--center min-h-[5.5rem]"
         role="status"
         aria-live="polite"
       >
+        <div className="flex flex-col gap-2 p-5">
         {liveStatus === "watching" && (
           <div className="flex items-center gap-4">
             <span className="ref-icon">
@@ -681,7 +741,7 @@ export function LiveInterpreter() {
               <span className="text-[22px] font-bold leading-none text-white">
                 {signLabelById[liveWord.signId] || liveWord.signId}
               </span>
-              <span className="rounded-full border border-[var(--ref-accent-line)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-[var(--ref-accent)]">
+              <span className="gi-tag rounded-full border border-[var(--ref-accent-line)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-[var(--ref-accent)]">
                 {liveWord.source === "you" ? "You" : "Shared"}
               </span>
             </div>
@@ -700,37 +760,23 @@ export function LiveInterpreter() {
             </span>
           </div>
         )}
-      </div>
+        </div>
+      </PanelGlow>
 
       {/* Building sentence */}
       {/*
-        Travelling beam on this panel's border, using the border-beam package.
-
-        Colour is "gold", not the default "colorful": this page has a locked
-        two-accent palette and colorful animates a full rainbow hue shift.
-        staticColors stops even the hue drift inside gold, so the beam stays
-        amber and reads as the secondary brand colour.
-
-        Performance. The library ships 12 stacked filter:blur() layers and 56
-        mask operations, which repaint on the main thread and visibly janked
-        against MediaPipe inference. Two knobs cut that cost without changing
-        the look much:
-          staticColors  removes the per-frame hue-shift rAF loop
-          glowSize 0.55 shrinks every blur radius, so the blurs are cheap
-        Note the real prop is "brightness", not "strength" as the widely
-        circulated snippet claims; the package does not accept "strength".
+        This panel used to carry a BorderBeam travelling along its border.
+        It cannot keep it: border-beam injects overflow:hidden on the
+        wrapper it renders, and BorderGlow's whole effect is an outer
+        bloom that has to escape the card, since the card itself sets
+        overflow:visible. The two are mutually exclusive, and the glow is
+        the effect being asked for, so the beam is gone. The panel also no
+        longer animates on mount, which is a side benefit — border-beam
+        ships 12 stacked blur layers and 56 mask operations that visibly
+        janked against MediaPipe inference.
       */}
-      <BorderBeam
-        size="md"
-        colorVariant="gold"
-        theme="dark"
-        staticColors
-        glowSize={0.55}
-        brightness={0.75}
-        borderRadius={16}
-        active={!reduceMotion}
-      >
-        <div className="ref-panel flex flex-col gap-3 p-5">
+      <PanelGlow>
+        <div className="flex flex-col gap-3 p-5">
         <span className="ref-label">
           <FileText size={14} weight="regular" />
           Signed so far
@@ -758,10 +804,19 @@ export function LiveInterpreter() {
           {previewText || <span className="text-[var(--ref-faint)]">Empty</span>}
         </div>
         </div>
-      </BorderBeam>
+      </PanelGlow>
 
       {/* Sub-Phase 2B: Conversation Transcript Panel */}
-      <div className="ref-panel flex flex-col gap-3 p-5">
+      {/*
+        flex-1 so this is the card that absorbs the height the camera
+        column sets. The grid used to be items-start, which left the
+        content column short of the camera and left a ragged gap at the
+        bottom right of the section. Stretching both columns and letting
+        the transcript take the slack pins the control bar to the bottom
+        and keeps the two columns the same height.
+      */}
+      <PanelGlow className="flex-1">
+        <div className="flex h-full flex-col gap-3 p-5">
         <div className="flex items-center justify-between gap-3">
           <span className="ref-label">
             <FileText size={14} weight="regular" />
@@ -785,7 +840,7 @@ export function LiveInterpreter() {
                 setTimeout(() => setCopyStatus(""), 2000);
               }}
               disabled={transcriptHistory.length === 0}
-              className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-[var(--ref-muted)] transition-colors hover:text-white disabled:opacity-40"
+              className="gi-ghost-btn -mr-1 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] font-medium text-[var(--ref-muted)] transition-colors hover:text-white disabled:opacity-40"
             >
               <Copy size={14} weight="regular" />
               {copyStatus || "Copy all"}
@@ -793,7 +848,7 @@ export function LiveInterpreter() {
             <button
               onClick={() => setTranscriptHistory([])}
               disabled={transcriptHistory.length === 0}
-              className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-[var(--ref-muted)] transition-colors hover:text-white disabled:opacity-40"
+              className="gi-ghost-btn -mr-1 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] font-medium text-[var(--ref-muted)] transition-colors hover:text-white disabled:opacity-40"
             >
               <Trash size={14} weight="regular" />
               Clear
@@ -810,12 +865,18 @@ export function LiveInterpreter() {
             transcriptHistory.map((entry) => (
               <div key={entry.id} className="flex gap-3 text-[13.5px]">
                 <span className="flex-shrink-0 font-mono text-[12px] text-[var(--ref-faint)]">{entry.timestamp}</span>
-                <span className="text-[var(--ref-text)]">{entry.text}</span>
+                <span className="text-[var(--ref-text)]">
+                  {entry.text}
+                  {entry.note && (
+                    <span className="mt-0.5 block text-[12px] italic text-[var(--ref-faint)]">{entry.note}</span>
+                  )}
+                </span>
               </div>
             ))
           )}
         </div>
-      </div>
+        </div>
+      </PanelGlow>
 
       <div className="flex flex-wrap items-stretch gap-3">
         <button

@@ -2931,13 +2931,16 @@ button {
   font-size: 0.875rem;
 }
 
-/* Headline: line one white, line two muted. A single treatment, used once. */
+/* Headline: line one white, line two amber. A single treatment, used once.
+   Was "Inter", "Inter Tight", system-ui, but neither Inter nor Inter Tight
+   is loaded in index.html, so the h1 was silently falling back to system-ui
+   and losing the display face. Sora is loaded and is the app's default. */
 .ref-title {
-  font-family: "Inter", "Inter Tight", system-ui, -apple-system, sans-serif;
+  font-family: "Sora", system-ui, -apple-system, sans-serif;
   font-size: clamp(2.5rem, 5.2vw, 4.4rem);
   font-weight: 700;
   letter-spacing: -0.03em;
-  line-height: 1.02;
+  line-height: 1.04;
 }
 
 .ref-title__dim {
@@ -2964,5 +2967,680 @@ button {
   .ref-page span[style*="ref-pulse"] {
     animation: none !important;
     transform: scaleY(0.7);
+  }
+}
+
+/* ===================================================================
+   STUDIO GLASS PASS — /interpret and /translate
+   -------------------------------------------------------------------
+   Presentation only. Scoped to .gi-page, which InterpretPage and
+   TranslatePage both put on their root. The shared ref-* primitives keep
+   their opaque values everywhere else, so /record and /delete are
+   untouched. Nothing here renames a ref-* class, moves a data-ref target
+   or touches a handler, so GSAP, the imperative video/canvas refs and
+   every callback are unaffected.
+
+   The page is flat #000 on purpose, so this is not the usual "colour
+   field behind frosted panels" trick. There is no backdrop to blur,
+   which means the glass has to be carried entirely by the surface
+   itself. Four things do that work here:
+
+   1. A near-empty fill. Whitish over black, but at the low end: 5%
+      white down to 1% and a 22% black at the bottom corner. Panels are
+      as transparent as they can be and still read as volumes.
+
+   2. A lit rim. On black a drop shadow is invisible, so depth comes
+      from light instead: a hairline, a bright top inset where light
+      catches the bevel, a soft inner glow, and a wide outer bloom
+      that reads as scatter around the frosted edge.
+
+   3. Frost, not transparency. A low-alpha noise layer sits in the
+      panel background. Perfectly clear panels read as empty outlines;
+      a little grain is what makes them read as a frosted sheet. The
+      same grain, as a fixed layer behind the whole page, is what the
+      GlassSurface displacement maps have to bend.
+
+   4. Pointer glow. The large panels are rendered by PanelGlow, which
+      tracks the cursor and drives a mesh-gradient border, a soft-light
+      rim fill and an outer bloom off two custom properties. A
+      travelling specular sheen also used to sit on the panel ::before
+      and is switched off: it read as a shimmer rather than as glass.
+   =================================================================== */
+
+.gi-page {
+  --gi-blur: 22px;
+  --gi-blur-sm: 10px;
+  --gi-body: rgba(255, 255, 255, 0.05);
+  --gi-body-2: rgba(255, 255, 255, 0.014);
+  --gi-body-3: rgba(0, 0, 0, 0.22);
+  --gi-wash: rgba(255, 255, 255, 0.022);
+  --gi-rim: rgba(255, 255, 255, 0.1);
+  --gi-rim-lit: rgba(255, 255, 255, 0.16);
+  --gi-bloom: 0 0 46px -20px rgba(255, 255, 255, 0.13);
+  --gi-drop: 0 26px 64px -30px rgba(0, 0, 0, 0.92);
+  --gi-frost: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23f)' opacity='0.05'/%3E%3C/svg%3E");
+
+  background: #000;
+  background-image: none;
+}
+
+/* A fixed grain field behind everything. Two jobs, and it is not a
+   gradient so it does not fight the flat-black rule: it keeps the page
+   from being a dead void, and more importantly it is the material the
+   GlassSurface displacement maps actually have to bend. A displacement
+   filter on a perfectly uniform black backdrop has nothing to refract
+   and renders as a plain blur. */
+.gi-page::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--gi-frost);
+  background-size: 200px 200px;
+  opacity: 0.55;
+}
+
+/* The section break. Everything above this — eyebrow, headline, lede —
+   sits flat on the black page. From here down the tool lives inside a
+   large rounded section, so the page reads as two zones rather than one
+   continuous column.
+
+   It is full bleed: the wrapper is a direct child of the page root, not
+   of the max-width container the masthead uses, so the corners land
+   against the viewport edges and the arc is actually visible. The radius
+   is a clamp rather than a fixed value so the corners stay oval at
+   1560px and still look deliberate on a phone.
+
+   Deliberately not a backdrop-filter. This container wraps every
+   GlassSurface panel on the page, and a blurred ancestor would make each
+   of them sample an already-filtered backdrop and multiply the cost of
+   seven displacement chains. A hairline and an inset light are enough to
+   draw the boundary.
+
+   Top corners only. It is full bleed, so rounding the bottom would lift
+   the section off the page and leave a black band under it. Squared off,
+   the section reads as the page opening into a panel. */
+.gi-page .gi-oval {
+  --gi-oval-r: clamp(28px, 4vw, 56px);
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 0;
+  border-radius: var(--gi-oval-r) var(--gi-oval-r) 0 0;
+  background: rgba(255, 255, 255, 0.016);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 70px -34px rgba(255, 255, 255, 0.16),
+    0 0 90px -46px rgba(255, 255, 255, 0.14);
+}
+
+/* The arc across the top of the section, so the corners read as a curve
+   catching light rather than as a border with a large radius. */
+.gi-page .gi-oval::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.055) 0%,
+    rgba(255, 255, 255, 0) 22%
+  );
+}
+
+/* Media viewports that must render exactly as they did before the glass
+   pass. Applied to the 3D avatar stage on /translate and the camera
+   viewport on /record.
+
+   Pinned to solid black with no backdrop-filter and no surface treatment.
+   Without this the shared panel rules would repaint them with a
+   translucent frosted fill; both viewports clear to their own opaque
+   colour so the visible result is the same, but neither should be relying
+   on that.
+
+   Deliberately not keyed on .ref-panel — the record stage is a
+   .cyber-camera-stage, not a .ref-panel, and the rule has to catch both. */
+.gi-page .gi-stage {
+  background: #000;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+
+/* The record page's controls are the older cyber-* set: square corners and
+   a clipped corner notch. That reads as a different design language once
+   the cards around them are rounded glass, so on the record page only,
+   they get the same radius and lose the notch. Scoped to .gi-page so the
+   landing and review surfaces keep the clipped look they were designed
+   with. */
+.gi-page .cyber-button,
+.gi-page .cyber-field,
+.gi-page .cyber-camera-stage,
+.gi-page .cyber-panel {
+  border-radius: var(--ref-radius-sm);
+  clip-path: none;
+}
+
+.gi-page .cyber-camera-stage {
+  border-radius: var(--ref-radius);
+}
+
+/* The translate pipeline bar is amber, not the live-state green the
+   shared progressbar fill assumes. Same treatment, page's own accent. */
+.gi-page [role="progressbar"] > div.gi-bar-amber {
+  background: linear-gradient(90deg, rgba(255, 176, 0, 0.6), #ffb000);
+  box-shadow: 0 0 12px -1px rgba(255, 176, 0, 0.85);
+}
+
+/* BorderGlow surface, scoped to the studio pages. See PanelGlow.jsx for
+   why --card-bg has to stay opaque; the gradient here layers on top of it
+   rather than replacing it, which is what keeps the mesh gradient masked
+   to the rim. */
+.gi-page .gi-glow {
+  background:
+    linear-gradient(163deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.014) 38%, rgba(0, 0, 0, 0.22) 100%),
+    var(--card-bg);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -22px 40px -30px rgba(0, 0, 0, 0.9),
+    0 26px 64px -30px rgba(0, 0, 0, 0.92);
+  transition: box-shadow 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.gi-page .gi-glow:hover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -22px 40px -30px rgba(0, 0, 0, 0.9),
+    0 26px 64px -30px rgba(0, 0, 0, 0.92);
+}
+
+/* Upstream sets overflow:auto on the inner, which would give the transcript
+   panel a second scrollbar on top of its own max-h-48 body. */
+.gi-page .gi-glow > .border-glow-inner {
+  overflow: visible;
+}
+
+/* For panels that centre their content along the main axis. The inner
+   wrapper is rendered by the component, so justify-content has to be set
+   from here rather than passed as a class. */
+.gi-page .gi-glow--center > .border-glow-inner {
+  justify-content: center;
+}
+
+/* The second .ref-page, from LiveInterpreter. Transparent so the tool column
+   does not lay a warm charcoal sheet over the black, and isolation is
+   released so the panels inside share the page's backdrop. */
+.gi-page .ref-page {
+  background: transparent;
+  isolation: auto;
+}
+
+/* Every glassed surface keeps ::after for the rim, which is the only
+   pseudo layer left. The travelling specular band that used to sit on
+   ::before is gone: it was the shimmer, and it is off page-wide.
+   overflow:hidden stays, so the rim and any future inner effect are
+   clipped to the surface rather than washing the page. */
+.gi-page .ref-panel,
+.gi-page .ref-btn,
+.gi-page .ref-chip,
+.gi-page .ref-field,
+.gi-page .ref-icon,
+.gi-page .ref-icon-btn,
+.gi-page .ref-pill,
+.gi-page .gi-tag,
+.gi-page .gi-ghost-btn,
+.gi-page .gi-overlay-pill {
+  position: relative;
+  overflow: hidden;
+}
+
+.gi-page .ref-panel::after,
+.gi-page .ref-btn::after,
+.gi-page .ref-chip::after,
+.gi-page .ref-field::after,
+.gi-page .ref-icon::after,
+.gi-page .ref-icon-btn::after,
+.gi-page .ref-pill::after,
+.gi-page .gi-tag::after,
+.gi-page .gi-ghost-btn::after,
+.gi-page .gi-overlay-pill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 0 1px var(--gi-rim),
+    inset 0 0 26px -8px rgba(255, 255, 255, 0.07);
+}
+
+/* The surface primitive. Border dropped, blur and a whitish-over-black
+   fill take its place, with the frost grain laid over the top. */
+.gi-page .ref-panel {
+  border: 0;
+  background:
+    var(--gi-frost) 0 0 / 220px 220px repeat,
+    linear-gradient(163deg, var(--gi-body) 0%, var(--gi-body-2) 38%, var(--gi-body-3) 100%),
+    var(--gi-wash);
+  box-shadow:
+    inset 0 1px 0 var(--gi-rim-lit),
+    inset 0 -22px 40px -30px rgba(0, 0, 0, 0.9),
+    var(--gi-bloom),
+    var(--gi-drop);
+  transition: box-shadow 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Plain frost only where there is no GlassSurface to refract with.
+   Excluding the component matters: this selector is more specific than
+   .glass-surface--svg, so letting it match would overwrite the
+   displacement filter with a flat blur and throw away the whole effect. */
+.gi-page .ref-panel:not(.glass-surface) {
+  -webkit-backdrop-filter: blur(var(--gi-blur)) saturate(150%);
+  backdrop-filter: blur(var(--gi-blur)) saturate(150%);
+}
+
+.gi-page .ref-panel:hover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -22px 40px -30px rgba(0, 0, 0, 0.9),
+    0 0 60px -18px rgba(255, 255, 255, 0.17),
+    var(--gi-drop);
+}
+
+/* The camera stage keeps an opaque backing: a live video is behind it and
+   a frosted panel there just lowers contrast on the hand landmarks. The
+   soft rim still applies, plus a wide amber bloom so the frame reads as
+   glass sitting on the page rather than a hole cut into it. */
+.gi-page .ref-panel.gi-stage {
+  background:
+    linear-gradient(163deg, rgba(255, 255, 255, 0.05) 0%, rgba(0, 0, 0, 0.22) 100%),
+    #0b0a09;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    var(--gi-drop),
+    0 0 90px -46px rgba(255, 197, 61, 0.55);
+}
+
+.gi-page .ref-label,
+.gi-page .ref-title {
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55);
+}
+
+.gi-page .ref-icon {
+  background:
+    var(--gi-frost) 0 0 / 150px 150px repeat,
+    linear-gradient(160deg, rgba(255, 197, 61, 0.16), rgba(255, 197, 61, 0.035) 55%, rgba(0, 0, 0, 0.2)),
+    rgba(255, 255, 255, 0.02);
+  -webkit-backdrop-filter: blur(var(--gi-blur-sm)) saturate(150%);
+  backdrop-filter: blur(var(--gi-blur-sm)) saturate(150%);
+  box-shadow: 0 0 20px -10px rgba(255, 197, 61, 0.3);
+}
+
+.gi-page .ref-icon::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 197, 61, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.gi-page .ref-icon--live {
+  background:
+    var(--gi-frost) 0 0 / 150px 150px repeat,
+    linear-gradient(160deg, rgba(52, 211, 153, 0.16), rgba(52, 211, 153, 0.035) 55%, rgba(0, 0, 0, 0.2)),
+    rgba(255, 255, 255, 0.02);
+  box-shadow: 0 0 20px -10px rgba(52, 211, 153, 0.3);
+}
+
+.gi-page .ref-icon--live::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(52, 211, 153, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.gi-page .ref-dot {
+  box-shadow: 0 0 12px 1px rgba(255, 197, 61, 0.55);
+}
+
+.gi-page .ref-pill {
+  border: 0;
+  background:
+    var(--gi-frost) 0 0 / 170px 170px repeat,
+    linear-gradient(160deg, rgba(255, 197, 61, 0.15), rgba(255, 255, 255, 0.022) 56%, rgba(0, 0, 0, 0.18)),
+    rgba(255, 255, 255, 0.02);
+  -webkit-backdrop-filter: blur(14px) saturate(155%);
+  backdrop-filter: blur(14px) saturate(155%);
+  box-shadow: 0 0 30px -14px rgba(255, 197, 61, 0.3);
+}
+
+.gi-page .ref-pill::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 197, 61, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+/* Buttons sit inside an already-frosted panel, so they get a lighter blur
+   and a nearly empty fill. The blurred parent is their backdrop. */
+.gi-page .ref-btn {
+  border: 0;
+  background:
+    var(--gi-frost) 0 0 / 160px 160px repeat,
+    linear-gradient(160deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.015) 46%, rgba(0, 0, 0, 0.18)),
+    rgba(255, 255, 255, 0.018);
+  -webkit-backdrop-filter: blur(var(--gi-blur-sm)) saturate(145%);
+  backdrop-filter: blur(var(--gi-blur-sm)) saturate(145%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 0 26px -14px rgba(255, 255, 255, 0.12);
+  transition: background 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.35s cubic-bezier(0.16, 1, 0.3, 1), transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.gi-page .ref-btn::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.11),
+    inset 0 0 20px -8px rgba(255, 255, 255, 0.07);
+  transition: box-shadow 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.gi-page .ref-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  background:
+    var(--gi-frost) 0 0 / 160px 160px repeat,
+    linear-gradient(160deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.035) 46%, rgba(0, 0, 0, 0.16)),
+    rgba(255, 255, 255, 0.022);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 0 36px -12px rgba(255, 255, 255, 0.2);
+}
+
+.gi-page .ref-btn:hover:not(:disabled)::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+    inset 0 0 24px -8px rgba(255, 255, 255, 0.11);
+}
+
+/* The lift on hover cannot stand in for the press. Base .ref-btn:active
+   is outranked by the hover rule above, so the press is restated here. */
+.gi-page .ref-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 0 18px -12px rgba(255, 255, 255, 0.1);
+}
+
+/* Primary stays the brightest thing on the page, as a luminous white
+   glass rather than a solid fill. */
+.gi-page .ref-btn--primary {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.74));
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  backdrop-filter: blur(14px) saturate(120%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 20px 44px -24px rgba(255, 255, 255, 0.4);
+}
+
+.gi-page .ref-btn--primary::after {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+}
+
+.gi-page .ref-btn--primary:hover:not(:disabled) {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 1), rgba(255, 255, 255, 0.88));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 1),
+    0 24px 52px -22px rgba(255, 255, 255, 0.5);
+}
+
+.gi-page .ref-btn--primary:hover:not(:disabled)::after {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+}
+
+.gi-page .ref-btn--primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.gi-page .ref-btn--live {
+  background:
+    var(--gi-frost) 0 0 / 160px 160px repeat,
+    linear-gradient(160deg, rgba(52, 211, 153, 0.17), rgba(52, 211, 153, 0.04) 50%, rgba(0, 0, 0, 0.18)),
+    rgba(255, 255, 255, 0.018);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 28px -12px rgba(52, 211, 153, 0.35);
+}
+
+.gi-page .ref-btn--live::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(52, 211, 153, 0.36),
+    inset 0 0 20px -8px rgba(52, 211, 153, 0.16);
+}
+
+.gi-page .ref-btn--live:hover:not(:disabled) {
+  background:
+    var(--gi-frost) 0 0 / 160px 160px repeat,
+    linear-gradient(160deg, rgba(52, 211, 153, 0.28), rgba(52, 211, 153, 0.08) 50%, rgba(0, 0, 0, 0.16)),
+    rgba(255, 255, 255, 0.022);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 0 40px -10px rgba(52, 211, 153, 0.45);
+}
+
+.gi-page .ref-btn--live:hover:not(:disabled)::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(52, 211, 153, 0.52),
+    inset 0 0 22px -8px rgba(52, 211, 153, 0.22);
+}
+
+.gi-page .ref-btn--accent {
+  background:
+    var(--gi-frost) 0 0 / 160px 160px repeat,
+    linear-gradient(160deg, rgba(255, 197, 61, 0.16), rgba(255, 197, 61, 0.04) 50%, rgba(0, 0, 0, 0.18)),
+    rgba(255, 255, 255, 0.018);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 28px -12px rgba(255, 197, 61, 0.32);
+}
+
+.gi-page .ref-btn--accent::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 197, 61, 0.36),
+    inset 0 0 20px -8px rgba(255, 197, 61, 0.16);
+}
+
+.gi-page .ref-btn--accent:hover:not(:disabled) {
+  background:
+    var(--gi-frost) 0 0 / 160px 160px repeat,
+    linear-gradient(160deg, rgba(255, 197, 61, 0.26), rgba(255, 197, 61, 0.08) 50%, rgba(0, 0, 0, 0.16)),
+    rgba(255, 255, 255, 0.022);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 0 40px -10px rgba(255, 197, 61, 0.42);
+}
+
+.gi-page .ref-btn--accent:hover:not(:disabled)::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 197, 61, 0.52),
+    inset 0 0 22px -8px rgba(255, 197, 61, 0.22);
+}
+
+.gi-page .ref-btn__sub {
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+}
+
+.gi-page .ref-chip {
+  border: 0;
+  background:
+    linear-gradient(160deg, rgba(255, 197, 61, 0.2), rgba(255, 197, 61, 0.05) 50%, rgba(0, 0, 0, 0.2)),
+    rgba(29, 25, 15, 0.4);
+  -webkit-backdrop-filter: blur(8px) saturate(145%);
+  backdrop-filter: blur(8px) saturate(145%);
+  box-shadow: 0 8px 18px -14px rgba(0, 0, 0, 0.85);
+}
+
+.gi-page .ref-chip::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 197, 61, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+/* The "Empty" field reads as a well cut into the glass, so the value sits
+   in shadow rather than on a raised surface. */
+.gi-page .ref-field {
+  border: 0;
+  background:
+    var(--gi-frost) 0 0 / 160px 160px repeat,
+    linear-gradient(160deg, rgba(0, 0, 0, 0.3), rgba(255, 255, 255, 0.03));
+  -webkit-backdrop-filter: blur(var(--gi-blur-sm));
+  backdrop-filter: blur(var(--gi-blur-sm));
+}
+
+.gi-page .ref-field::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.075),
+    inset 0 2px 12px -6px rgba(0, 0, 0, 0.9),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Pills overlaid on the video, where there is no panel behind them. */
+.gi-page .gi-overlay-pill {
+  border: 0;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.03) 50%, rgba(0, 0, 0, 0.26)),
+    rgba(14, 13, 11, 0.5);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  backdrop-filter: blur(16px) saturate(160%);
+  box-shadow: 0 12px 28px -16px rgba(0, 0, 0, 0.9);
+}
+
+.gi-page .gi-overlay-pill::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+
+.gi-page .ref-icon-btn {
+  border: 0;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03) 50%, rgba(0, 0, 0, 0.28)),
+    rgba(14, 13, 11, 0.5);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  backdrop-filter: blur(16px) saturate(160%);
+  box-shadow: 0 12px 26px -14px rgba(0, 0, 0, 0.9);
+}
+
+.gi-page .ref-icon-btn::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+
+.gi-page .ref-icon-btn:hover {
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.06) 50%, rgba(0, 0, 0, 0.24)),
+    rgba(18, 17, 15, 0.54);
+  box-shadow: 0 14px 30px -14px rgba(0, 0, 0, 0.92);
+}
+
+.gi-page .ref-icon-btn:hover::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+/* The small "You / Shared" tag on a recognised word. */
+.gi-page .gi-tag {
+  background:
+    linear-gradient(160deg, rgba(255, 197, 61, 0.2), rgba(255, 197, 61, 0.05) 55%, rgba(0, 0, 0, 0.2)),
+    rgba(29, 25, 15, 0.4);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
+  backdrop-filter: blur(8px) saturate(150%);
+}
+
+.gi-page .gi-tag::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 197, 61, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+/* Copy all / Clear. Bare text until hover, then a small glass pill. */
+.gi-page .gi-ghost-btn {
+  border-radius: 999px;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.015) 55%, rgba(0, 0, 0, 0.16));
+  -webkit-backdrop-filter: blur(8px) saturate(140%);
+  backdrop-filter: blur(8px) saturate(140%);
+  transition: background 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s, opacity 0.2s;
+}
+
+.gi-page .gi-ghost-btn::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.gi-page .gi-ghost-btn:hover:not(:disabled) {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05) 55%, rgba(0, 0, 0, 0.14));
+  box-shadow: 0 10px 20px -14px rgba(0, 0, 0, 0.85);
+}
+
+.gi-page .gi-ghost-btn:hover:not(:disabled)::after {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+/* Progress and confidence tracks: a dark well with a lit fill. */
+.gi-page [role="progressbar"] {
+  background: rgba(0, 0, 0, 0.36);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    inset 0 1px 7px -2px rgba(0, 0, 0, 0.9);
+}
+
+.gi-page [role="progressbar"] > div {
+  background: linear-gradient(90deg, rgba(52, 211, 153, 0.6), var(--ref-live));
+  box-shadow: 0 0 12px -1px rgba(52, 211, 153, 0.85);
+}
+
+.gi-page ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.gi-page ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.gi-page ::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.gi-page ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 197, 61, 0.32);
+}
+
+/* Without backdrop-filter the translucent fills would read as flat grey
+   boxes, so fall back to solid surfaces. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .gi-page .ref-panel,
+  .gi-page .ref-btn,
+  .gi-page .ref-chip,
+  .gi-page .ref-icon,
+  .gi-page .ref-pill,
+  .gi-page .ref-icon-btn,
+  .gi-page .gi-overlay-pill,
+  .gi-page .gi-tag,
+  .gi-page .gi-ghost-btn {
+    background: #211f1b;
+  }
+
+  .gi-page .ref-field,
+  .gi-page [role="progressbar"] {
+    background: #14120f;
+  }
+
+  .gi-page .ref-btn--primary {
+    background: #f4f4f5;
   }
 }

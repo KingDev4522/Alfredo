@@ -5,13 +5,27 @@
 // recomputing DTW each time. Only band width and landmark weighting
 // actually require a fresh matrix.
 import { readFileSync, writeFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, resolve } from "path";
 import { dtwDistance } from "../src/lib/dtw.js";
-import { fingertipWeighted, uniformWeight } from "../src/lib/recognizer.js";
+import { fingertipWeighted, uniformWeight, buildTemplateLibrary, classifySequence } from "../src/lib/recognizer.js";
+import { PREFILTER_GATE } from "../src/lib/shapePrefilter.js";
 
-const DATA_PATH = process.argv[2] || "/mnt/user-data/uploads/isl-recordings-export-2026-07-23.json";
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = resolve(HERE, "..");
+// Default: the live localhost database (same file the backend serves).
+// Accepts BOTH shapes: raw array (recordings.json) and {recordings:[...]} exports.
+const CLI_ARGS = process.argv.slice(2);
+const WRITE_THRESHOLDS = CLI_ARGS.includes("--write-thresholds");
+const DATA_PATH = CLI_ARGS.find((a) => !a.startsWith("--")) || resolve(REPO, "isl-backend/database/recordings.json");
+const OUT_PATH = resolve(REPO, "evaluation-results.json");
 const raw = JSON.parse(readFileSync(DATA_PATH, "utf-8"));
-const recordings = raw.recordings;
-console.log(`Loaded ${recordings.length} recordings.\n`);
+const recordings = Array.isArray(raw) ? raw : raw.recordings;
+if (!Array.isArray(recordings) || recordings.length === 0) {
+  console.error(`No recordings found in ${DATA_PATH}. Record or import data first.`);
+  process.exit(1);
+}
+console.log(`Loaded ${recordings.length} recordings from ${DATA_PATH}.\n`);
 
 // --- Flag signs with inconsistent hand-count capture ---
 console.log("=== Hand-count consistency check ===");
@@ -232,8 +246,109 @@ for (let t = 0; t <= 1; t += 0.02) {
 }
 console.log(`\nSuggested confidence threshold: ${bestThreshold.toFixed(2)}`);
 
+// --- Feature 2: shape-prefilter parity + per-sign thresholds ---
+// (Report is written after these blocks compute.)
+console.log("\n=== Shape-prefilter parity (k=1, leave-one-out) ===");
+const prefilterReport = { gate: PREFILTER_GATE, match: 0, total: 0, skippedTotal: 0, dtwTotal: 0 };
+for (const bucket of [byBucket[1], byBucket[2]]) {
+  for (let i = 0; i < bucket.length; i++) {
+    const lib = buildTemplateLibrary(bucket.filter((_, j) => j !== i));
+    const withGate = classifySequence(bucket[i].frames, lib, { landmarkWeight: fingertipWeighted, bandFraction: bestBand, prefilter: true });
+    const withoutGate = classifySequence(bucket[i].frames, lib, { landmarkWeight: fingertipWeighted, bandFraction: bestBand, prefilter: false });
+    prefilterReport.total++;
+    if (withGate.signId === withoutGate.signId) prefilterReport.match++;
+    prefilterReport.skippedTotal += withGate.prefiltered?.skipped ?? 0;
+    prefilterReport.dtwTotal += withGate.prefiltered?.total ?? 0;
+  }
+}
+const skipRate = prefilterReport.dtwTotal > 0 ? prefilterReport.skippedTotal / prefilterReport.dtwTotal : 0;
+console.log(`  parity: ${prefilterReport.match}/${prefilterReport.total} identical answers`);
+console.log(`  DTW calls skipped: ${prefilterReport.skippedTotal}/${prefilterReport.dtwTotal} (${(skipRate * 100).toFixed(1)}%)`);
+if (prefilterReport.match < prefilterReport.total) {
+  console.log("  WARNING: gate changed answers — raise PREFILTER_GATE in shapePrefilter.js and re-run.");
+} else {
+  console.log("  Gate is safe on this data.");
+}
+
+// Per-sign thresholds: Youden-J-optimal cutoff per sign from the final
+// (band, k) predictions. Signs with no wrong-side data keep the global.
+const posBySign = {};
+const negBySign = {};
+function collect(bucket, matrix, k) {
+  for (let i = 0; i < bucket.length; i++) {
+    const trueSign = bucket[i].signId;
+    const dists = [];
+    for (let j = 0; j < bucket.length; j++) {
+      if (j === i) continue;
+      dists.push({ idx: j, signId: bucket[j].signId, distance: matrix[i][j] });
+    }
+    dists.sort((a, b) => a.distance - b.distance);
+    const nearestK = dists.slice(0, k);
+    const scores = {};
+    for (const { signId, distance } of nearestK) {
+      scores[signId] = (scores[signId] || 0) + 1 / (distance + 0.05);
+    }
+    const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+    const predicted = ranked[0][0];
+    const winningEntry = nearestK.find((n) => n.signId === predicted);
+    const confidence = 1 / (1 + winningEntry.distance / 0.6);
+    (predicted === trueSign ? (posBySign[predicted] ??= []) : (negBySign[predicted] ??= [])).push(confidence);
+  }
+}
+collect(byBucket[1], finalMatrix1, bestK);
+if (finalMatrix2) collect(byBucket[2], finalMatrix2, Math.min(bestK, byBucket[2].length - 1));
+const perSignThresholds = {};
+// Minimum evidence: a threshold learned from 1-2 samples is overfit noise.
+// Below this, the sign keeps the global 0.36 until more takes are recorded.
+const MIN_POS = 3;
+const MIN_NEG = 2;
+for (const [sign, pos] of Object.entries(posBySign)) {
+  const neg = negBySign[sign] || [];
+  if (pos.length < MIN_POS || neg.length < MIN_NEG) continue; // thin data: keep global
+  let bestT = 0;
+  let bestJ = -Infinity;
+  for (let t = 0; t <= 1; t += 0.02) {
+    const tpr = pos.filter((c) => c >= t).length / pos.length;
+    const fpr = neg.filter((c) => c >= t).length / neg.length;
+    const J = tpr - fpr;
+    if (J > bestJ) { bestJ = J; bestT = t; }
+  }
+  perSignThresholds[sign] = Math.round(bestT * 100) / 100;
+}
+console.log("\n=== Per-sign thresholds (Youden-J; missing signs keep 0.36) ===");
+if (Object.keys(perSignThresholds).length === 0) {
+  console.log("  None learnable on this data (need both right + wrong examples per sign). Global 0.36 stands.");
+} else {
+  for (const [sign, t] of Object.entries(perSignThresholds)) console.log(`  ${sign.padEnd(14)} ${t.toFixed(2)}`);
+}
+
+if (WRITE_THRESHOLDS) {
+  const target = resolve(REPO, "src/lib/signThresholds.js");
+  const body = `/**
+ * Per-sign confidence thresholds (Feature 2).
+ *
+ * GENERATED by \`node scripts/evaluate.mjs --write-thresholds\` — do not hand
+ * edit values; re-run the script after recording sessions instead. Any sign
+ * missing here falls back to CONFIDENCE_THRESHOLD (recognizer.js).
+ *
+ * Each value is the Youden-J-optimal cutoff separating that sign's correct
+ * matches from wrong ones on real recorded data. Signs with thin data keep
+ * the global default until more takes exist.
+ */
+export const SIGN_THRESHOLDS = ${JSON.stringify(perSignThresholds, null, 2)};
+
+export const SIGN_THRESHOLD_META = {
+  generatedAt: ${JSON.stringify(new Date().toISOString())},
+  recordingCount: ${recordings.length},
+  globalFallback: 0.36,
+};
+`;
+  writeFileSync(target, body);
+  console.log(`\nWrote ${target}`);
+}
+
 writeFileSync(
-  "/home/claude/isl-interpreter/evaluation-results.json",
-  JSON.stringify({ bestBand, bestK, accuracy: finalMerged.accuracy, perSign: finalMerged.perSign, confusion: finalMerged.confusion, suggestedThreshold: bestThreshold, mixedHandCountSigns: Object.entries(handCountsBySign).filter(([, c]) => Object.keys(c).length > 1).map(([s]) => s) }, null, 2)
+  OUT_PATH,
+  JSON.stringify({ bestBand, bestK, accuracy: finalMerged.accuracy, perSign: finalMerged.perSign, confusion: finalMerged.confusion, suggestedThreshold: bestThreshold, perSignThresholds, prefilter: prefilterReport, mixedHandCountSigns: Object.entries(handCountsBySign).filter(([, c]) => Object.keys(c).length > 1).map(([s]) => s) }, null, 2)
 );
-console.log("\nFull results written to evaluation-results.json");
+console.log(`\nFull results written to ${OUT_PATH}`);

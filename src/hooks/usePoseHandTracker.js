@@ -126,6 +126,70 @@ function getVision() {
   return visionSingletonPromise;
 }
 
+/*
+ * Shared, reference-counted task instances.
+ *
+ * Every consumer of this hook used to build its own pair of WASM graphs, and
+ * the GPU delegate backs each graph with a real WebGL context. That made the
+ * context count a function of how many components happened to be mounted, and
+ * browsers cap live WebGL contexts and drop the oldest when the cap is hit —
+ * which is what killed the three.js avatar with "THREE.WebGLRenderer: Context
+ * Lost" while MediaPipe was running. Two components on one route, doubled
+ * again by StrictMode's mount/unmount/mount in dev, was enough.
+ *
+ * The graphs are stateless between detectForVideo calls, so sharing one pair
+ * across every consumer is safe and caps MediaPipe at two contexts for the
+ * whole app.
+ *
+ * Release is delayed rather than immediate. StrictMode unmounts and remounts
+ * in the same commit, so closing on the first unmount would tear the graphs
+ * down and rebuild them on every dev mount — the exact churn this is meant to
+ * remove.
+ */
+const RELEASE_DELAY_MS = 1500;
+
+let shared = null; // { hand, pose, delegate }
+let sharedPromise = null; // in-flight load
+let consumers = 0;
+let releaseTimer = null;
+
+async function loadShared() {
+  const vision = await getVision();
+
+  let hand, pose, delegateUsed;
+
+  try {
+    // Try GPU first
+    [hand, pose] = await loadDelegate(vision, "GPU", 7000, 7000);
+    delegateUsed = "GPU";
+  } catch (gpuError) {
+    console.warn("GPU delegate failed/timed out, falling back to CPU:", gpuError);
+    [hand, pose] = await loadDelegate(vision, "CPU", 20000, 20000);
+    delegateUsed = "CPU";
+  }
+
+  return { hand, pose, delegate: delegateUsed };
+}
+
+function releaseShared() {
+  // Clamped, so a double cleanup can never drive the counter negative and
+  // silently skip the release for the next real consumer.
+  consumers = Math.max(0, consumers - 1);
+  if (consumers > 0) return;
+  clearTimeout(releaseTimer);
+  releaseTimer = setTimeout(() => {
+    if (consumers > 0) return;
+    if (shared) {
+      safeClose(shared.hand);
+      safeClose(shared.pose);
+      shared = null;
+    }
+    // Cleared so a later mount retries instead of awaiting a rejected promise
+    // that can never settle twice.
+    sharedPromise = null;
+  }, RELEASE_DELAY_MS);
+}
+
 export function usePoseHandTracker() {
   const [poseLandmarker, setPoseLandmarker] = useState(null);
   const [handLandmarker, setHandLandmarker] = useState(null);
@@ -135,56 +199,50 @@ export function usePoseHandTracker() {
 
   useEffect(() => {
     let isCancelled = false;
-    let localHand = null;
-    let localPose = null;
 
-    async function loadModels() {
-      try {
-        const vision = await getVision();
+    consumers += 1;
+    clearTimeout(releaseTimer);
 
-        let hand, pose, delegateUsed;
+    // Already loaded by an earlier consumer: adopt it synchronously rather
+    // than re-awaiting, so a second component on the same route gets its
+    // landmarkers on the first render.
+    if (shared) {
+      setHandLandmarker(shared.hand);
+      setPoseLandmarker(shared.pose);
+      setActiveDelegate(shared.delegate);
+      setIsLoading(false);
+    } else {
+      if (!sharedPromise) {
+        sharedPromise = loadShared().catch((error) => {
+          // Let the next mount try again instead of caching the failure.
+          sharedPromise = null;
+          throw error;
+        });
+      }
 
-        try {
-          // Try GPU first
-          [hand, pose] = await loadDelegate(vision, "GPU", 7000, 7000);
-          delegateUsed = "GPU";
-        } catch (gpuError) {
-          console.warn("GPU delegate failed/timed out, falling back to CPU:", gpuError);
-          [hand, pose] = await loadDelegate(vision, "CPU", 20000, 20000);
-          delegateUsed = "CPU";
-        }
-
-        if (!isCancelled) {
-          localHand = hand;
-          localPose = pose;
-          setHandLandmarker(hand);
-          setPoseLandmarker(pose);
-          setActiveDelegate(delegateUsed);
+      sharedPromise
+        .then((result) => {
+          shared = result;
+          if (isCancelled) return;
+          setHandLandmarker(result.hand);
+          setPoseLandmarker(result.pose);
+          setActiveDelegate(result.delegate);
           setIsLoading(false);
-        } else {
-          safeClose(hand);
-          safeClose(pose);
-        }
-      } catch (error) {
-        if (!isCancelled) {
+        })
+        .catch((error) => {
+          if (isCancelled) return;
           setLoadError(
             "Could not load tracking models on either GPU or CPU. " +
             "Check console. Try a hard refresh."
           );
           setIsLoading(false);
-        }
-        console.error("Dual Tracker failed to load:", error);
-      }
+          console.error("Dual Tracker failed to load:", error);
+        });
     }
-
-    loadModels();
 
     return () => {
       isCancelled = true;
-      safeClose(localHand);
-      safeClose(localPose);
-      localHand = null;
-      localPose = null;
+      releaseShared();
     };
   }, []);
 

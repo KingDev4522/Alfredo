@@ -20,23 +20,36 @@ const TRANSLATE_URL = `${API_BASE}/api/translate`;
 const AI_TIMEOUT_MS = 20000;
 
 /**
- * Returns { phrases, aiUsed }. `phrases` is always usable — either the AI
- * sentence (single phrase) or the plain grammar result as fallback.
+ * Returns { phrases, aiUsed, corrections }. `phrases` is always usable —
+ * either the AI sentence (single phrase) or the plain grammar result as
+ * fallback. `corrections` is [{from, to}] when the backend completed
+ * partial letter strings ("watr" -> "water"); empty when input was whole.
  */
-export async function buildSpokenPhrasesWithAI(signIds, { autoGrammar = true } = {}) {
+export async function buildSpokenPhrasesWithAI(signIds, { autoGrammar = true, knownWords = [] } = {}) {
   const fallbackWords = [];
   const phrases = buildSpokenPhrases(signIds, { autoGrammar, fallbackOut: fallbackWords });
 
   // Grammar covered everything (or is off) — no AI needed.
   if (!autoGrammar || fallbackWords.length === 0) {
-    return { phrases, aiUsed: false };
+    return { phrases, aiUsed: false, corrections: [] };
+  }
+
+  // Locked rule: ONE signed token is spoken literally, never expanded into
+  // a sentence. A single "A" must stay the letter A (or the single word) —
+  // the user may be spelling or naming one thing, and any sentence the AI
+  // invents around it ("I need water" for WATER) is a fabrication. Sentence
+  // formation only starts at two or more tokens.
+  if (signIds.length <= 1) {
+    return { phrases, aiUsed: false, corrections: [] };
   }
 
   try {
     const res = await fetch(SENTENCE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ words: signIds }),
+      // knownWords lets the backend complete partial letter strings
+      // (custom words included) before asking the LLM — ids and/or labels.
+      body: JSON.stringify({ words: signIds, knownWords }),
       signal: AbortSignal.timeout(AI_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`sentence API: HTTP ${res.status}`);
@@ -47,12 +60,15 @@ export async function buildSpokenPhrasesWithAI(signIds, { autoGrammar = true } =
     if (!sentence || !/[A-Za-z]{2,}/.test(sentence)) {
       throw new Error("sentence API: degenerate reply");
     }
-    return { phrases: [sentence], aiUsed: true };
+    const corrections = Array.isArray(data?.corrections)
+      ? data.corrections.filter((c) => c && typeof c.from === "string" && typeof c.to === "string")
+      : [];
+    return { phrases: [sentence], aiUsed: true, corrections };
   } catch (err) {
     // Offline, no keys, all models failed, too slow — speak the literal
     // words exactly as before. Log once for debuggability.
     console.warn("[sentenceAI] falling back to literal words:", err?.message || err);
-    return { phrases, aiUsed: false };
+    return { phrases, aiUsed: false, corrections: [] };
   }
 }
 

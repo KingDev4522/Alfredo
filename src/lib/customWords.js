@@ -1,6 +1,6 @@
 import { VOCABULARY } from "./vocabulary";
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
-import { getAllRecordings } from "./recordingStorage";
+import { getSignCoverage } from "./recordingStorage";
 
 // Custom words: Supabase `custom_words` when configured, localStorage fallback otherwise.
 // Global admin words (is_global) are visible to everyone; personal words are owner-only.
@@ -104,37 +104,33 @@ export async function syncCustomWordsWithDatabase() {
         .from("custom_words")
         .select("owner_id, word_id, label, is_global");
       const known = new Set(getAllWords().map((w) => w.id));
-      let updated = false;
       for (const cw of cloudWords || []) {
         if (cw.is_global || (user && cw.owner_id === user.id)) {
           if (!known.has(cw.word_id)) {
             addCustomWord(cw.label, cw.word_id);
-            updated = true;
+            known.add(cw.word_id);
           }
         }
       }
-      if (updated) return true;
     }
-    const recordings = await getAllRecordings();
+    // Which sign ids exist in the database. getSignCoverage selects sign_id
+    // only, so this is a few KB. It used to call getAllRecordings, which
+    // hydrated every frames blob from both tables in order to read the same
+    // set of ids off each row — the entire recording library, downloaded as
+    // landmark JSON, on every page load, from three separate mount effects.
+    const { shared, mine } = await getSignCoverage();
     const currentWords = getAllWords();
     const knownIds = new Set(currentWords.map(w => w.id));
 
-    const dbIds = new Set();
-    for (const r of recordings) {
-      if (r && r.signId) {
-        dbIds.add(r.signId);
-      }
-    }
-
-    let updated = false;
+    const dbIds = new Set([...Object.keys(shared), ...Object.keys(mine)]);
     for (const id of dbIds) {
       if (!knownIds.has(id)) {
         const label = id.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
         addCustomWord(label, id);
-        updated = true;
       }
     }
-    return updated;
+    // Success = sync completed without throwing, even if nothing new was found.
+    return true;
   } catch (err) {
     console.error("Failed to sync custom words with database:", err);
     return false;

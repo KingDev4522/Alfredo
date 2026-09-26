@@ -31,6 +31,7 @@ logs/
 *.tmp
 isl-backend/database/*.backup-*.json
 isl-backend/*.backup-*.json
+evaluation-results.json
 
 # ---- LARGE / ML FILES ----
 *.onnx

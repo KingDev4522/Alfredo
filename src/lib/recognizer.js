@@ -1,4 +1,6 @@
 import { dtwDistance } from "./dtw.js";
+import { prefilterTakes, PREFILTER_GATE } from "./shapePrefilter.js";
+import { SIGN_THRESHOLDS } from "./signThresholds.js";
 
 /**
  * Fingertip-weighted landmark weighting: fingertips count 2.5x more than
@@ -46,13 +48,17 @@ export function buildTemplateLibrary(recordings) {
  * voting can smooth out the effect of any single unusual template being
  * the closest match - see evaluate.mjs for whether this actually helps
  * on our vocabulary rather than assuming it does.
+ * options.prefilter: run the cheap shape gate first (default true).
+ * options.prefilterGate: shape-distance cutoff (default PREFILTER_GATE).
+ * The gate only ever SKIPS work: an emptied pool falls back to full
+ * search, and skip counts ride along on `result.prefiltered`.
  */
 export function classifySequence(liveFrames, templateLibrary, options = {}) {
-  const { k = 1 } = options;
+  const { k = 1, prefilter = true, prefilterGate = PREFILTER_GATE } = options;
 
   const liveHandCount = mostCommonHandCount(liveFrames);
   if (liveHandCount === 0) {
-    return { signId: null, distance: Infinity, confidence: 0, runnerUp: null };
+    return { signId: null, distance: Infinity, confidence: 0, runnerUp: null, prefiltered: { skipped: 0, total: 0, active: false } };
   }
 
   // Search the hand-count bucket that matches what was detected live, but
@@ -68,14 +74,22 @@ export function classifySequence(liveFrames, templateLibrary, options = {}) {
   const primaryCandidates = templateLibrary[liveHandCount] || [];
   const otherHandCount = liveHandCount === 1 ? 2 : 1;
   const secondaryCandidates = templateLibrary[otherHandCount] || [];
-  const candidates = [...primaryCandidates, ...secondaryCandidates];
+  let candidates = [...primaryCandidates, ...secondaryCandidates];
 
   if (candidates.length === 0) {
-    return { signId: null, distance: Infinity, confidence: 0, runnerUp: null };
+    return { signId: null, distance: Infinity, confidence: 0, runnerUp: null, prefiltered: { skipped: 0, total: 0, active: false } };
   }
 
-  // Compute distance to every candidate template, keep them all sorted - 
-  // we need the k nearest, not just the single nearest.
+  // Compute distance to every candidate template, keep them all sorted -
+  // we need the k nearest, not just the single nearest. The shape gate
+  // runs first and only narrows the DTW loop; it never changes the answer
+  // set when nothing passes (full-search fallback inside prefilterTakes).
+  let prefilterInfo = { skipped: 0, total: candidates.length, active: false };
+  if (prefilter && candidates.length > 1) {
+    const filtered = prefilterTakes(liveFrames, candidates, prefilterGate);
+    candidates = filtered.kept;
+    prefilterInfo = { skipped: filtered.skipped, total: filtered.skipped + filtered.kept.length, active: true };
+  }
   const distances = candidates.map((template) => ({
     signId: template.signId,
     distance: dtwDistance(liveFrames, template.frames, options),
@@ -91,6 +105,7 @@ export function classifySequence(liveFrames, templateLibrary, options = {}) {
       confidence: distanceToConfidence(best.distance),
       runnerUp: secondBest.signId,
       runnerUpDistance: secondBest.distance,
+      prefiltered: prefilterInfo,
     };
   }
 
@@ -116,6 +131,7 @@ export function classifySequence(liveFrames, templateLibrary, options = {}) {
     confidence: distanceToConfidence(winningDistance),
     runnerUp: runnerUpSign,
     runnerUpDistance: distances.find((d) => d.signId === runnerUpSign)?.distance ?? Infinity,
+    prefiltered: prefilterInfo,
   };
 }
 
@@ -128,6 +144,26 @@ export function classifySequence(liveFrames, templateLibrary, options = {}) {
  * update this if the vocabulary changes meaningfully.
  */
 export const CONFIDENCE_THRESHOLD = 0.36;
+
+/**
+ * Feature 2 — per-sign threshold. Generated values live in
+ * signThresholds.js (`node scripts/evaluate.mjs --write-thresholds`);
+ * anything missing or out of range falls back to the global default, so
+ * this is behavior-identical until the script writes real values.
+ * Accepts a number OR a (signId) => number function (libraryMerge).
+ */
+export function thresholdFor(signId, fallback = CONFIDENCE_THRESHOLD) {
+  const t = SIGN_THRESHOLDS[signId];
+  if (typeof t === "number" && t >= 0 && t <= 1) return t;
+  return typeof fallback === "number" ? fallback : CONFIDENCE_THRESHOLD;
+}
+
+/** Resolve the `threshold` option (number | function | undefined). */
+export function limitForSign(threshold, signId) {
+  if (typeof threshold === "function") return threshold(signId);
+  if (typeof threshold === "number") return threshold;
+  return thresholdFor(signId);
+}
 
 /**
  * Converts a raw DTW distance into a 0-1 confidence score. Smaller

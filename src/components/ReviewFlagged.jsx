@@ -1,8 +1,30 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAllWords, syncCustomWordsWithDatabase } from "../lib/customWords";
-import { deleteRecording, getAllRecordings } from "../lib/recordingStorage";
+import { deleteRecording, getAllRecordings, getSignCoverage } from "../lib/recordingStorage";
+import { TARGET_REPS_PER_SIGN } from "../lib/vocabulary";
 import { useAuth } from "../hooks/useAuth";
 import { SkeletonPlayback } from "./SkeletonPlayback";
+
+/*
+ * Coverage status, derived from take counts against the rep target.
+ *
+ *   ready   at or past TARGET_REPS_PER_SIGN, so the recognizer has
+ *           enough variation to work with
+ *   partial something is on file but the library is thin, and a thin
+ *           library is the usual cause of a sign that recognises badly
+ *   missing nothing at all
+ */
+function coverageStatus(total) {
+  if (total <= 0) return "missing";
+  if (total >= TARGET_REPS_PER_SIGN) return "ready";
+  return "partial";
+}
+
+const STATUS_COPY = {
+  ready: { label: "Ready", className: "text-[#C8FF00]", dot: "bg-[#C8FF00]" },
+  partial: { label: "Partial", className: "text-[#FFB000]", dot: "bg-[#FFB000]" },
+  missing: { label: "Missing", className: "text-[rgba(242,240,232,0.46)]", dot: "bg-[rgba(242,240,232,0.28)]" },
+};
 
 export function ReviewFlagged() {
   const { isAdmin } = useAuth();
@@ -14,8 +36,43 @@ export function ReviewFlagged() {
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState("neutral");
   const [isLoading, setIsLoading] = useState(false);
+  const [coverage, setCoverage] = useState({ shared: {}, mine: {} });
+  const [isCoverageLoading, setIsCoverageLoading] = useState(true);
 
   const signLabelById = Object.fromEntries(allWords.map((word) => [word.id, word.label]));
+
+  /*
+   * Take counts keyed by sign id, lowercased on both sides.
+   *
+   * Storage writes the vocabulary slug verbatim, but nothing enforces the
+   * case at the column, and a hand-imported file can carry "Hello" where
+   * the vocabulary says "hello". getMainSignSet already uppercases for the
+   * same reason, so matching case-insensitively here keeps the coverage
+   * grid from silently reporting a word as missing.
+   */
+  const coverageIndex = useMemo(() => {
+    const shared = {};
+    const mine = {};
+    for (const [id, count] of Object.entries(coverage.shared)) {
+      shared[String(id).toLowerCase()] = (shared[String(id).toLowerCase()] || 0) + count;
+    }
+    for (const [id, count] of Object.entries(coverage.mine)) {
+      mine[String(id).toLowerCase()] = (mine[String(id).toLowerCase()] || 0) + count;
+    }
+    return { shared, mine };
+  }, [coverage]);
+
+  const refreshCoverage = useCallback(async () => {
+    try {
+      setCoverage(await getSignCoverage());
+    } catch {
+      // getSignCoverage already swallows its own failures; this is belt and
+      // braces so the panel can never take the page down with it.
+      setCoverage({ shared: {}, mine: {} });
+    } finally {
+      setIsCoverageLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     async function sync() {
@@ -29,13 +86,69 @@ export function ReviewFlagged() {
     setScope(isAdmin ? "main" : "mine");
   }, [isAdmin]);
 
+  useEffect(() => {
+    refreshCoverage();
+  }, [refreshCoverage]);
+
   function setFeedback(text, tone = "neutral") {
     setMessage(text);
     setMessageTone(tone);
   }
 
-  async function loadRecordings() {
-    const query = nameInput.trim().toLowerCase();
+  /*
+   * grouped: category -> words, so the grid mirrors how the Record picker
+   * is organised rather than presenting one flat alphabet.
+   *
+   * Words present in the database but missing from the vocabulary still get
+   * a row, labelled by a title-cased id. customWords.syncCustomWordsWithDatabase
+   * normally folds those in already; this is the fallback for the window
+   * before that sync resolves.
+   */
+  const coverageGroups = useMemo(() => {
+    const known = new Set(allWords.map((word) => word.id));
+    const byCategory = new Map();
+
+    const push = (category, word) => {
+      if (!byCategory.has(category)) byCategory.set(category, []);
+      byCategory.get(category).push(word);
+    };
+
+    for (const word of allWords) push(word.category || "Custom", word);
+
+    for (const [id, count] of Object.entries(coverageIndex.shared)) {
+      if (known.has(id)) continue;
+      push("Unlisted", {
+        id,
+        label: signLabelById[id] || id.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" "),
+        count,
+      });
+    }
+
+    return Array.from(byCategory, ([category, words]) => ({
+      category,
+      words: words.sort((a, b) => a.label.localeCompare(b.label)),
+    }));
+  }, [allWords, coverageIndex, signLabelById]);
+
+  const coverageTotals = useMemo(() => {
+    let ready = 0;
+    let partial = 0;
+    let missing = 0;
+    for (const group of coverageGroups) {
+      for (const word of group.words) {
+        const key = word.id.toLowerCase();
+        const total = (coverageIndex.shared[key] || 0) + (coverageIndex.mine[key] || 0);
+        if (coverageStatus(total) === "ready") ready += 1;
+        else if (coverageStatus(total) === "partial") partial += 1;
+        else missing += 1;
+      }
+    }
+    return { ready, partial, missing, total: ready + partial + missing };
+  }, [coverageGroups, coverageIndex]);
+
+  async function loadRecordings(explicitLabel) {
+    const rawLabel = explicitLabel !== undefined ? explicitLabel : nameInput;
+    const query = String(rawLabel).trim().toLowerCase();
     if (!query) {
       setFeedback("Type a sign name first.", "error");
       return;
@@ -44,7 +157,7 @@ export function ReviewFlagged() {
     const matchingWords = allWords.filter((word) => word.label.toLowerCase().includes(query));
     if (matchingWords.length === 0) {
       setRecordings([]);
-      setFeedback(`No sign matches "${nameInput.trim()}". Check the spelling.`, "error");
+      setFeedback(`No sign matches "${String(rawLabel).trim()}". Check the spelling.`, "error");
       return;
     }
 
@@ -103,6 +216,7 @@ export function ReviewFlagged() {
     try {
       const result = await deleteRecording(recording.id);
       setRecordings((current) => current.filter((item) => item.id !== recording.id));
+      refreshCoverage();
       const mirrorNote =
         result && result.fileMirror > 0
           ? ` Legacy file copies removed: ${result.fileMirror}.`
@@ -119,6 +233,108 @@ export function ReviewFlagged() {
 
   return (
     <div className="grid w-full gap-4">
+      {/*
+        Coverage. Answers "which words are already on file" without making
+        anyone remember, which is the whole point: the search box below only
+        works if you already know what to type.
+      */}
+      <section className="cyber-panel grid gap-4 p-4 sm:p-5" aria-label="Recording coverage">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <span className="ss-eyebrow">Library coverage</span>
+            <h2 className="m-0 text-xl font-semibold tracking-tight text-[#F2F0E8]">
+              What is already recorded
+            </h2>
+          </div>
+          <span className="font-mono text-xs text-[rgba(242,240,232,0.68)]">
+            target {TARGET_REPS_PER_SIGN} takes per sign
+          </span>
+        </div>
+
+        {isCoverageLoading ? (
+          <p className="m-0 text-sm text-[rgba(242,240,232,0.46)]" role="status">
+            Reading the database...
+          </p>
+        ) : (
+          <>
+            <p className="m-0 font-mono text-xs text-[rgba(242,240,232,0.68)]" role="status">
+              <span className="text-[#C8FF00]">{coverageTotals.ready} ready</span>
+              {" // "}
+              <span className="text-[#FFB000]">{coverageTotals.partial} partial</span>
+              {" // "}
+              <span>{coverageTotals.missing} missing</span>
+              {" of "}
+              {coverageTotals.total}
+            </p>
+
+            <div className="grid gap-4">
+              {coverageGroups.map((group) => (
+                <div key={group.category} className="grid gap-2">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-[rgba(242,240,232,0.46)]">
+                    {group.category}
+                  </span>
+                  <ul className="m-0 grid list-none gap-2 p-0 sm:grid-cols-2 xl:grid-cols-3">
+                    {group.words.map((word) => {
+                      const key = word.id.toLowerCase();
+                      const sharedCount = coverageIndex.shared[key] || 0;
+                      const mineCount = coverageIndex.mine[key] || 0;
+                      const total = sharedCount + mineCount;
+                      const status = coverageStatus(total);
+                      const copy = STATUS_COPY[status];
+                      const inSharedMain = sharedCount > 0;
+
+                      return (
+                        <li key={word.id}>
+                          {/*
+                            A button, not a div: the row is the fastest route
+                            into the takes, and it has to be reachable by
+                            keyboard. explicitLabel is passed rather than
+                            relying on setNameInput, because state does not
+                            settle before the click handler reads it.
+                          */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNameInput(word.label);
+                              loadRecordings(word.label);
+                            }}
+                            className={`flex w-full items-center gap-3 border px-3 py-2 text-left transition-colors ${
+                              inSharedMain
+                                ? "border-[#55F6E5]/30 hover:border-[#55F6E5]/60"
+                                : "border-white/10 hover:border-white/30"
+                            } ${status === "missing" ? "border-dashed" : ""}`}
+                          >
+                            <span
+                              aria-hidden="true"
+                              className={`h-2 w-2 flex-none rounded-full ${copy.dot}`}
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm text-[#F2F0E8]">
+                                {word.label}
+                              </span>
+                              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[rgba(242,240,232,0.46)]">
+                                {total === 0
+                                  ? "no takes"
+                                  : `${total} take${total === 1 ? "" : "s"}`}
+                                {inSharedMain ? " // shared main" : ""}
+                                {mineCount > 0 ? ` // ${mineCount} yours` : ""}
+                              </span>
+                            </span>
+                            <span className={`font-mono text-[10px] uppercase ${copy.className}`}>
+                              {copy.label}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </section>
+
       <section className="cyber-panel grid gap-4 p-4 sm:p-5" aria-label="Recording search">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>

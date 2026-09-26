@@ -1,4 +1,4 @@
-import { buildTemplateLibrary, classifySequence } from "./recognizer.js";
+import { buildTemplateLibrary, classifySequence, limitForSign } from "./recognizer.js";
 
 /**
  * Merged Main + User library with hard MAIN priority (admin goldens win).
@@ -38,12 +38,11 @@ export function buildMergedLibrary(mainRecs = [], userRecs = []) {
  */
 export function classifyWithPriority(liveFrames, mergedLibrary, options = {}) {
   const { threshold, ...dtwOptions } = options;
-  const limit = threshold ?? options.confidenceThreshold ?? 0.36;
 
   // Stage A: Shared Main first. Confident Main match wins outright, even if a
   // personal take for the same word would score closer on raw DTW distance.
   const mainResult = classifySequence(liveFrames, mergedLibrary.main, dtwOptions);
-  if (mainResult.signId && mainResult.confidence >= limit) {
+  if (mainResult.signId && mainResult.confidence >= limitForSign(threshold, mainResult.signId)) {
     return { ...mainResult, source: "shared" };
   }
 
@@ -53,7 +52,7 @@ export function classifyWithPriority(liveFrames, mergedLibrary, options = {}) {
   // safe to accept.
   if (mergedLibrary.userCount > 0) {
     const userResult = classifySequence(liveFrames, mergedLibrary.user, dtwOptions);
-    if (userResult.signId && userResult.confidence >= limit) {
+    if (userResult.signId && userResult.confidence >= limitForSign(threshold, userResult.signId)) {
       return { ...userResult, source: "you" };
     }
     // Neither stage confident: hand back the stronger of the two so the

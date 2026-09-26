@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
 import { DrawingUtils, HandLandmarker } from "@mediapipe/tasks-vision";
@@ -22,10 +22,11 @@ import {
   clearAllRecordings,
   deleteRecordingsForSign,
 } from "../lib/recordingStorage";
-import { isSupabaseConfigured } from "../lib/supabaseClient";
+import { isSupabaseConfigured, API_DB_URL } from "../lib/supabaseClient";
 import { useAuth } from "../hooks/useAuth";
 import { SkeletonPlayback } from "./SkeletonPlayback";
 import { PublishModal } from "./PublishModal";
+import { PanelGlow } from "./PanelGlow";
 
 gsap.registerPlugin(useGSAP);
 
@@ -58,7 +59,7 @@ export function RecordingTool() {
   // deliberately write-only here (nothing reads it yet); it exists so the
   // per-frame update below never throws a ReferenceError.
   const [, setLiveSeenHands] = useState({});
-  const [pendingRecording, setPendingRecording] = useState(null); // { frames, handCounts }
+  const [pendingRecording, setPendingRecording] = useState(null); // { frames, handCounts, recordingType: 'static' | 'motion' }
   const [playToken, setPlayToken] = useState(0);
   const [counts, setCounts] = useState({});
   const [recordedBy, setRecordedBy] = useState("");
@@ -67,6 +68,70 @@ export function RecordingTool() {
   const [newWordLabel, setNewWordLabel] = useState("");
   const [removeWordId, setRemoveWordId] = useState("");
   const [importMessage, setImportMessage] = useState("");
+  // PRD 18 — required Static/Motion choice, stored PER WORD.
+  //
+  // Static vs motion is a property of the sign, not of the take and not a
+  // global setting: every take of "Water" is a static pose, every take of
+  // "Hello" is motion. This used to be one scalar for the whole session,
+  // which meant a type picked for one sign silently carried over to the next
+  // and up to 15 takes could be written to the database mislabelled. The
+  // gate was satisfied, so nothing errored — the data was just wrong.
+  //
+  // Keyed by sign id it is picked once per sign, cannot leak to another
+  // sign, and still survives switching back and forth while batch recording.
+  const [recordingTypeBySign, setRecordingTypeBySign] = useState({}); // { [signId]: 'static' | 'motion' }
+  // Derived, so the pre-record gate (startCountdown) keeps working with no
+  // change at the call site.
+  const recordingType = recordingTypeBySign[selectedSignId] || null;
+
+  // Latest-value refs for the always-on camera loop below.
+  //
+  // The detection loop subscribes ONCE (deps: landmarkers + cameraStatus) and
+  // runs at 30-60fps. finishRecording() is called from inside that loop, so a
+  // direct call would invoke the closure from the render the loop started in —
+  // typically signId "hello" + recordingType null — no matter what the user
+  // picked since. The take was then stamped with the wrong sign and a null
+  // classification, which is exactly the "I chose Static but it says I did
+  // not" failure. These refs always hold the current render's values, and the
+  // loop calls through finishRecordingRef so it runs the LATEST closure.
+  const selectedSignIdRef = useRef(selectedSignId);
+  const recordingTypeBySignRef = useRef(recordingTypeBySign);
+  useEffect(() => {
+    selectedSignIdRef.current = selectedSignId;
+    recordingTypeBySignRef.current = recordingTypeBySign;
+  }, [selectedSignId, recordingTypeBySign]);
+  const finishRecordingRef = useRef(null);
+
+  /*
+   * A pending take owns its own sign and its own classification.
+   *
+   * Both used to be read from live component state at save time, which meant
+   * a take could be filed against whichever word happened to be selected when
+   * the user pressed Keep, and a take whose classification went missing was
+   * permanently unsaveable: the classifier lives in the left column, so from
+   * the review panel there was no way out of it. The sign is snapshotted into
+   * the take at record time, and the classification is resolved through the
+   * take's own sign so it can be set or corrected from either column.
+   */
+  function takeSignId(take) {
+    return take?.signId || selectedSignId;
+  }
+  function takeRecordingType(take) {
+    if (!take) return null;
+    if (take.recordingType === "static" || take.recordingType === "motion") {
+      return take.recordingType;
+    }
+    return recordingTypeBySign[takeSignId(take)] || null;
+  }
+  function chooseRecordingType(value, signId = selectedSignId) {
+    setRecordingTypeBySign((current) => ({ ...current, [signId]: value }));
+    // Keep any pending take for this sign in step, so classifying from the
+    // review panel also unblocks Keep and Publish there.
+    setPendingRecording((current) =>
+      current && takeSignId(current) === signId ? { ...current, recordingType: value } : current,
+    );
+    setSaveMessage("");
+  }
   // PRD 02 v2 §5.4 - admin publish target + double-confirm modal.
   // Locked rule: the admin account always defaults to Shared Main; every other
   // account always saves to its own space (no toggle rendered for non-admins).
@@ -78,6 +143,29 @@ export function RecordingTool() {
   // Upper-cased signIds owned by Shared Main. Non-admin takes for these words
   // are blocked (hard Main-wins): Interpreter + avatar ignore them anyway.
   const [mainSignSet, setMainSignSet] = useState(new Set());
+  // Localhost-file bridge availability. Both sync buttons below shell out to
+  // the FastAPI backend on this machine; on any other machine (a friend's
+  // demo phone/laptop) that URL is their own empty localhost, so showing the
+  // buttons only produces "backend offline" errors. Probed once on mount and
+  // used purely to hide them — every other save path already degrades
+  // gracefully when the file backend is unreachable.
+  const [fileBackendOnline, setFileBackendOnline] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    async function probeFileBackend() {
+      try {
+        const ctrl = new AbortController();
+        const timer = window.setTimeout(() => ctrl.abort(), 5000);
+        const res = await fetch(`${API_DB_URL}/recordings`, { signal: ctrl.signal });
+        window.clearTimeout(timer);
+        if (!cancelled) setFileBackendOnline(res.ok);
+      } catch {
+        if (!cancelled) setFileBackendOnline(false);
+      }
+    }
+    probeFileBackend();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (isAdmin) setSaveTarget("main");
@@ -85,6 +173,14 @@ export function RecordingTool() {
   }, [isAdmin]);
 
   const selectedSign = allWords.find((w) => w.id === selectedSignId) ?? VOCABULARY[0];
+  // Labels for any sign, not just the selected one. A pending take carries
+  // its own sign id, which can differ from selectedSignId, so the save and
+  // publish messages and the review header need to resolve a label from an
+  // arbitrary id rather than reading the selected one.
+  const signLabelById = useMemo(
+    () => Object.fromEntries(allWords.map((w) => [w.id, w.label])),
+    [allWords],
+  );
 
   async function refreshWords(isMounted = () => true) {
     const success = await syncCustomWordsWithDatabase();
@@ -366,7 +462,9 @@ export function RecordingTool() {
           });
 
           if (nowMs - recordingStartTimeRef.current >= RECORDING_DURATION_MS) {
-            finishRecording();
+            // Through the ref: runs the latest render's closure (current
+            // signId + classification), not the stale one from loop setup.
+            finishRecordingRef.current?.();
           }
         }
       }
@@ -389,6 +487,11 @@ export function RecordingTool() {
   }, [poseLandmarker, handLandmarker, cameraStatus]);
 
   function startCountdown() {
+    // PRD 18: Static/Motion choice is required BEFORE recording. No default.
+    if (recordingType !== "static" && recordingType !== "motion") {
+      setSaveMessage("Pick Static or Motion first — every recording must be classified.");
+      return;
+    }
     setSaveMessage("");
     setMode("countdown");
     setCountdownValue(COUNTDOWN_SECONDS);
@@ -457,7 +560,12 @@ export function RecordingTool() {
     }, 1000);
 
     return () => clearTimeout(timeoutId);
-  }, [mode, countdownValue]);
+    // recordingType is a dep on purpose so the countdown closure sees the
+    // current classification. Harmless to re-run: the option buttons are
+    // disabled during countdown/recording, so this cannot change mid-countdown.
+    // (The actual take stamp reads from refs in finishRecording, so even the
+    // 2-second capture window after the countdown cannot go stale.)
+  }, [mode, countdownValue, recordingType]);
 
   function beginRecording() {
     recordingFramesRef.current = [];
@@ -492,13 +600,38 @@ export function RecordingTool() {
       return;
     }
 
-    setPendingRecording({ frames: result.frames, handCounts: handCountsSeen });
+    // signId + classification are snapshotted with the frames, read from the
+    // latest-value refs (never from a stale camera-loop closure). The review
+    // header, Keep and Publish all resolve through the take's own sign, so a
+    // take can never be filed under the wrong word or lose its Static/Motion
+    // flag between Start and Keep.
+    const liveSignId = selectedSignIdRef.current;
+    const liveType = recordingTypeBySignRef.current[liveSignId] || null;
+    setPendingRecording({
+      frames: result.frames,
+      handCounts: handCountsSeen,
+      signId: liveSignId,
+      recordingType: liveType,
+    });
     setPlayToken((t) => t + 1);
     setMode("reviewing");
   }
+  // Assigned every render so the camera loop always invokes the closure above
+  // with current state, even though the loop itself subscribed long ago.
+  finishRecordingRef.current = finishRecording;
 
   async function keepRecording() {
     if (!pendingRecording) return;
+    // PRD 18: the classification flag travels with the take. Resolved through
+    // the take's own sign, and settable from the review panel, so a take that
+    // lost its classification is recoverable instead of a dead end.
+    const type = takeRecordingType(pendingRecording);
+    if (type !== "static" && type !== "motion") {
+      setSaveMessage("Classify this take as Static or Motion before keeping it.");
+      return;
+    }
+
+    const signId = takeSignId(pendingRecording);
 
     // Admin publishing to Main requires double-confirm modal (PRD 02 v2 §5.4).
     if (isAdmin && saveTarget === "main") {
@@ -509,19 +642,20 @@ export function RecordingTool() {
     // Hard Main-wins: a non-admin personal take for a Main-owned word is dead
     // on arrival (Interpreter + avatar always play the admin golden), so block
     // the save with a clear message instead of storing a shadow row.
-    if (!isAdmin && isSupabaseConfigured && isSignInMainSet(selectedSignId, mainSignSet)) {
+    if (!isAdmin && isSupabaseConfigured && isSignInMainSet(signId, mainSignSet)) {
       setSaveMessage(
-        `"${selectedSign.label}" is already in the Shared Main database. The Interpreter and the Translate avatar always use the admin version, so this take was NOT saved. Add a genuinely new word to record something personal.`
+        `"${signLabelById[signId] || signId}" is already in the Shared Main database. The Interpreter and the Translate avatar always use the admin version, so this take was NOT saved. Add a genuinely new word to record something personal.`
       );
       return;
     }
 
     try {
       await saveRecording({
-        signId: selectedSignId,
+        signId,
         recordedBy: recordedBy.trim() || "Unknown",
         conditionLabel: conditionLabel.trim() || "unspecified",
         handCount: majorityHandCount(pendingRecording.handCounts),
+        recordingType: type,
         frames: pendingRecording.frames,
         recordedAt: Date.now(),
       }, "mine");
@@ -532,7 +666,7 @@ export function RecordingTool() {
 
     setPendingRecording(null);
     setMode("idle");
-    setSaveMessage(`Saved to My Space. ${selectedSign.label} now has ${(counts[selectedSignId] || 0) + 1} recording(s).`);
+    setSaveMessage(`Saved to My Space. ${signLabelById[signId] || signId} now has ${(counts[signId] || 0) + 1} recording(s).`);
     refreshCounts();
   }
 
@@ -544,15 +678,39 @@ export function RecordingTool() {
 
   const confirmPublishToMain = useCallback(async () => {
     if (!pendingRecording) return;
+    // Resolved the same way as keepRecording, so a take classified from the
+    // review panel publishes correctly instead of re-failing here. Reads the
+    // ref (never a stale closure): the callback is memoized, so the state
+    // value it closed over would otherwise be one render behind the review
+    // classifier and Publish would re-fail right after classifying.
+    const takeId = pendingRecording.signId || selectedSignIdRef.current;
+    const type =
+      pendingRecording.recordingType === "static" || pendingRecording.recordingType === "motion"
+        ? pendingRecording.recordingType
+        : recordingTypeBySignRef.current[takeId] || null;
+    if (type !== "static" && type !== "motion") {
+      // Keep the modal open but make the failure visible: the page message
+      // sits behind the overlay, so surface it on the modal's own status via
+      // the page message AND a forced close would lose the take context.
+      // Closing is worse (take stays, user confused); instead report inline
+      // by closing the modal so the message is readable next to the review
+      // classifier that can fix it.
+      setShowPublish(false);
+      setSaveMessage("Classify this take as Static or Motion before publishing it.");
+      setPublishBusy(false);
+      return;
+    }
     setPublishBusy(true);
     try {
+      const signId = takeId;
       // PRD 05 dual-write: same payload object goes to Supabase Main AND the
       // GitHub-tracked localhost file, in the identical app format.
       const payload = {
-        signId: selectedSignId,
+        signId,
         recordedBy: recordedBy.trim() || "Unknown",
         conditionLabel: conditionLabel.trim() || "unspecified",
         handCount: majorityHandCount(pendingRecording.handCounts),
+        recordingType: type,
         frames: pendingRecording.frames,
         recordedAt: Date.now(),
       };
@@ -573,8 +731,7 @@ export function RecordingTool() {
     } finally {
       setPublishBusy(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingRecording, selectedSignId, recordedBy, conditionLabel, refreshCounts]);
+  }, [pendingRecording, recordedBy, conditionLabel, refreshCounts]);
 
   // One-click bridge: push everything currently in the localhost file to Main.
   // For recordings made while the Supabase API was blind. Admin only.
@@ -656,11 +813,14 @@ export function RecordingTool() {
     !isAdmin && isSupabaseConfigured && isSignInMainSet(selectedSignId, mainSignSet);
 
   return (
-    <div ref={rootRef} className="flex w-full max-w-6xl flex-col gap-6">
-      <div className="cyber-recording-grid grid grid-cols-1 items-start gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+    <div ref={rootRef} className="flex w-full flex-col gap-6">
+      <div className="cyber-recording-grid grid grid-cols-1 items-start gap-6 lg:grid-cols-[1.1fr_0.9fr] lg:gap-10">
         {/* Left: camera + controls */}
         <div className="flex flex-col gap-4 lg:sticky lg:top-24">
-          <div className="cyber-camera-stage relative aspect-video w-full overflow-hidden border border-white/10 bg-white/[0.03]">
+          {/* gi-stage pins this back to solid black in index.css so the
+              glass pass does not repaint the MediaPipe viewport. Nothing
+              inside the video/canvas pair is touched. */}
+          <div className="cyber-camera-stage gi-stage relative aspect-video w-full overflow-hidden border border-white/10 bg-white/[0.03]">
             <video
               ref={videoRef}
               autoPlay
@@ -712,10 +872,93 @@ export function RecordingTool() {
             </div>
           )}
 
+          {/*
+            PRD 18: required classification, no default — Start is blocked
+            until the current sign is classified.
+
+            Rendered as a segmented pair rather than two bare buttons. The
+            previous version styled the unselected state as `bg-black
+            text-slate-300` with no border, so on a black card the two
+            options were indistinguishable from the labels beside them and
+            read as plain text. Each option now carries its own border and
+            surface, and the selected one fills in the page's accent for that
+            type: amber for static, cyan for motion, matching the colours
+            already used for those two outcomes in the review panel.
+
+            The label names the sign, because the choice is per sign and it
+            needs to be obvious which one you are about to classify.
+          */}
+          <div
+            className="flex flex-wrap items-center gap-3 border border-white/10 bg-black/40 px-3 py-2.5"
+            role="radiogroup"
+            aria-label={`Recording type for ${selectedSign.label}`}
+          >
+            <span className="text-xs text-slate-300">
+              Type for <span className="font-semibold text-white">{selectedSign.label}</span>{" "}
+              <span className="text-[#FFB000]">*required</span>
+            </span>
+
+            <div className="flex flex-wrap gap-2">
+              {/*
+                Enabled in "idle" AND "reviewing". The take carries its own
+                sign, and chooseRecordingType() pushes the choice into the
+                pending take when the signs match — so re-classifying from
+                this left column also unblocks Keep/Publish. Only the live
+                capture windows (countdown/recording) lock it, since the take
+                is being written then. Previously disabled in review, which
+                left an unclassified take with no way out from this column.
+              */}
+              <button
+                type="button"
+                role="radio"
+                aria-checked={recordingType === "static"}
+                onClick={() => {
+                  const targetId = pendingRecording ? takeSignId(pendingRecording) : selectedSignId;
+                  chooseRecordingType("static", targetId);
+                  setSaveMessage("");
+                }}
+                disabled={mode === "countdown" || mode === "recording"}
+                title={mode === "reviewing" ? "Re-classify this take — updates Keep/Publish too" : undefined}
+                className={`rounded-[10px] border px-3.5 py-2 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  recordingType === "static"
+                    ? "border-[#FFB000] bg-[#FFB000] text-[#050505]"
+                    : "border-white/20 bg-black text-slate-300 hover:border-[#FFB000]/70 hover:text-white"
+                }`}
+              >
+                Static <span className="font-normal opacity-70">(one pose)</span>
+              </button>
+
+              <button
+                type="button"
+                role="radio"
+                aria-checked={recordingType === "motion"}
+                onClick={() => {
+                  const targetId = pendingRecording ? takeSignId(pendingRecording) : selectedSignId;
+                  chooseRecordingType("motion", targetId);
+                  setSaveMessage("");
+                }}
+                disabled={mode === "countdown" || mode === "recording"}
+                title={mode === "reviewing" ? "Re-classify this take — updates Keep/Publish too" : undefined}
+                className={`rounded-[10px] border px-3.5 py-2 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  recordingType === "motion"
+                    ? "border-[#55F6E5] bg-[#55F6E5] text-slate-900"
+                    : "border-white/20 bg-black text-slate-300 hover:border-[#55F6E5]/70 hover:text-white"
+                }`}
+              >
+                Motion <span className="font-normal opacity-70">(movement)</span>
+              </button>
+            </div>
+
+            {!recordingType && mode === "idle" ? (
+              <span className="text-xs text-slate-500">Pick one before Start Recording.</span>
+            ) : null}
+          </div>
+
           <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={startCountdown}
               disabled={mode !== "idle" || isLoading || cameraStatus !== "ready"}
+              title={!recordingType ? "Pick Static or Motion first" : undefined}
               className="border border-[#FFB000] bg-[#FFB000] px-5 py-2 font-semibold text-[#050505] disabled:cursor-not-allowed disabled:opacity-40"
             >
               Start Recording
@@ -773,7 +1016,8 @@ export function RecordingTool() {
 
         {/* Right: sign picker + review */}
         <div className="flex flex-col gap-4 min-w-0">
-          <div className="cyber-panel flex flex-col gap-3 p-4">
+          <PanelGlow>
+          <div className="flex flex-col gap-3 p-5 sm:p-6">
             <label className="cyber-login__label" htmlFor="custom-word-label">
               Add a custom word
             </label>
@@ -824,10 +1068,17 @@ export function RecordingTool() {
               </div>
             )}
           </div>
+          </PanelGlow>
 
           <SignPicker
             words={allWords}
             selectedSignId={selectedSignId}
+            /* Locked while a take is pending. The take now carries its own
+               sign id, so this is defence in depth rather than the fix — but
+               changing the selected word mid-review made the header, the
+               progress panel and the take disagree about what you were
+               looking at. */
+            disabled={mode === "reviewing" || mode === "recording" || mode === "countdown"}
             onSelect={(id) => {
               setSelectedSignId(id);
               setSaveMessage("");
@@ -839,7 +1090,8 @@ export function RecordingTool() {
             isAdmin={isAdmin}
           />
 
-          <div className="cyber-panel flex flex-col gap-3 p-4">
+          <PanelGlow>
+          <div className="flex flex-col gap-3 p-5 sm:p-6">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-slate-200">{selectedSign.label}</span>
               <span
@@ -892,10 +1144,79 @@ export function RecordingTool() {
               </button>
             )}
           </div>
+          </PanelGlow>
 
           {mode === "reviewing" && pendingRecording && (
-            <div ref={reviewPanelRef} className="cyber-panel flex flex-col items-center gap-3 p-4">
-              <span className="ss-eyebrow self-start !mb-0">Review take</span>
+            /*
+             * The ref sits on this wrapper, not on the PanelGlow, because
+             * PanelGlow does not forward refs. It has to be the outermost
+             * animated node: the entrance tween uses autoAlpha, and if it
+             * only covered the inner content the card frame would sit
+             * there fully opaque while its contents faded in.
+             */
+            <div ref={reviewPanelRef}>
+            <PanelGlow>
+            <div className="flex flex-col items-center gap-3 p-5 sm:p-6">
+              <span className="ss-eyebrow self-start !mb-0">
+                Review take
+                <span className="ml-2 font-mono text-xs text-slate-400">
+                  ({takeRecordingType(pendingRecording) === "static"
+                    ? "Static"
+                    : takeRecordingType(pendingRecording) === "motion"
+                      ? "Motion"
+                      : "unclassified"}
+                  {" // "}
+                  {signLabelById[takeSignId(pendingRecording)] || takeSignId(pendingRecording)})
+                </span>
+              </span>
+
+              {/*
+                The classifier, repeated here on purpose.
+
+                It is also in the left column, before recording, because you
+                need to know what kind of take you are capturing. But the
+                decision that matters is made here, with the take in front of
+                you — so it has to be reachable here too. It used to exist
+                only in the other column while Keep and Publish both refused
+                an unclassified take, which left no way out of the screen.
+              */}
+              <div
+                className="flex w-full flex-wrap items-center justify-center gap-2 border border-white/10 bg-black/40 px-3 py-2.5"
+                role="radiogroup"
+                aria-label="Classify this take"
+              >
+                <span className="text-xs text-slate-300">
+                  Classify as <span className="text-[#FFB000]">*required</span>
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={takeRecordingType(pendingRecording) === "static"}
+                    onClick={() => chooseRecordingType("static", takeSignId(pendingRecording))}
+                    className={`rounded-[10px] border px-3.5 py-2 text-xs font-semibold transition-colors ${
+                      takeRecordingType(pendingRecording) === "static"
+                        ? "border-[#FFB000] bg-[#FFB000] text-[#050505]"
+                        : "border-white/20 bg-black text-slate-300 hover:border-[#FFB000]/70 hover:text-white"
+                    }`}
+                  >
+                    Static
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={takeRecordingType(pendingRecording) === "motion"}
+                    onClick={() => chooseRecordingType("motion", takeSignId(pendingRecording))}
+                    className={`rounded-[10px] border px-3.5 py-2 text-xs font-semibold transition-colors ${
+                      takeRecordingType(pendingRecording) === "motion"
+                        ? "border-[#55F6E5] bg-[#55F6E5] text-slate-900"
+                        : "border-white/20 bg-black text-slate-300 hover:border-[#55F6E5]/70 hover:text-white"
+                    }`}
+                  >
+                    Motion
+                  </button>
+                </div>
+              </div>
               <SkeletonPlayback frames={pendingRecording.frames} isPlaying={true} playToken={playToken} />
               <div className="flex flex-wrap justify-center gap-2">
                 <button
@@ -929,6 +1250,8 @@ export function RecordingTool() {
                 </button>
               </div>
             </div>
+            </PanelGlow>
+            </div>
           )}
         </div>
       </div>
@@ -961,7 +1284,7 @@ export function RecordingTool() {
           >
             Import recordings (.json)
           </button>
-          {isAdmin && isSupabaseConfigured && (
+          {isAdmin && isSupabaseConfigured && fileBackendOnline && (
             <button
               onClick={handleSyncFileToMain}
               title="Push everything in the localhost GitHub-tracked file into Supabase Main (for recordings made while the API was blind)"
@@ -970,7 +1293,7 @@ export function RecordingTool() {
               Sync localhost file → Main
             </button>
           )}
-          {isSupabaseConfigured && (
+          {isSupabaseConfigured && fileBackendOnline && (
             <button
               onClick={handleSyncSupabaseToFile}
               title="Pull Shared Main recordings into the localhost file so the Translate avatar can play them (personal takes are never synced)"
@@ -1004,7 +1327,12 @@ export function RecordingTool() {
 
       <PublishModal
         open={showPublish}
-        signLabel={selectedSign?.label || selectedSignId}
+        signLabel={
+          signLabelById[pendingRecording?.signId || selectedSignId]
+            || selectedSign?.label
+            || pendingRecording?.signId
+            || selectedSignId
+        }
         count={1}
         busy={publishBusy}
         onCancel={handleClosePublish}
@@ -1023,11 +1351,18 @@ function SignPicker({
   isSupabaseConfigured,
   mainSignSet = new Set(),
   isAdmin = false,
+  disabled = false,
 }) {
   const categories = [...new Set(words.map((word) => word.category))];
 
   return (
-    <section className="cyber-panel max-h-96 overflow-y-auto p-4" aria-label="Sign picker">
+    <PanelGlow>
+    {/*
+      The max-height and the overflow live on the inner div, not on the
+      PanelGlow card. Putting them on the card would clip the outer glow,
+      which is the whole effect.
+    */}
+    <section className="max-h-96 overflow-y-auto p-5 sm:p-6" aria-label="Sign picker">
       {categories.map((category) => (
         <div key={category} className="mb-5 last:mb-0">
           <div className="cyber-login__label mb-2">{category}</div>
@@ -1050,7 +1385,8 @@ function SignPicker({
                     key={word.id}
                     type="button"
                     onClick={() => onSelect(word.id)}
-                    title={mainLocked ? "Already in Shared Main. Interpreter and avatar always use the admin version; personal takes are blocked." : undefined}
+                    disabled={disabled}
+                    title={disabled ? "Keep or discard the take in review first." : mainLocked ? "Already in Shared Main. Interpreter and avatar always use the admin version; personal takes are blocked." : undefined}
                     className={`border px-3 py-2 text-left text-xs ${
                       selected
                         ? "border-[#FFB000] bg-[#FFB000] text-[#050505]"
@@ -1075,6 +1411,7 @@ function SignPicker({
         </div>
       ))}
     </section>
+    </PanelGlow>
   );
 }
 
@@ -1092,7 +1429,8 @@ function OverallProgress({ counts, words, splitCounts, isSupabaseConfigured }) {
   const percent = totalTarget > 0 ? (totalDone / totalTarget) * 100 : 0;
 
   return (
-    <section className="cyber-panel p-4" aria-label="Personal recording progress">
+    <PanelGlow>
+    <section className="p-5 sm:p-6" aria-label="Personal recording progress">
       <div className="mb-2 flex flex-col justify-between gap-1 text-sm text-slate-300 sm:flex-row">
         <span>Personal capture: {completedSigns} / {words.length} signs complete</span>
         <span className="font-mono text-slate-400">
@@ -1108,10 +1446,11 @@ function OverallProgress({ counts, words, splitCounts, isSupabaseConfigured }) {
         aria-valuenow={Math.round(percent)}
       >
         <div
-          className="h-full bg-[#FFB000] transition-[width] duration-500"
+          className="gi-bar-amber h-full bg-[#FFB000] transition-[width] duration-500"
           style={{ width: `${percent}%` }}
         />
       </div>
     </section>
+    </PanelGlow>
   );
 }

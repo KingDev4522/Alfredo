@@ -121,6 +121,13 @@ const _ikLerpW = new THREE.Vector3();
 const _ikTargetW = new THREE.Vector3();
 const _ikTargetR = new THREE.Vector3();
 const _ikLerpW2 = new THREE.Vector3();
+// Recorded-elbow targets (model space, plain rigid map — none of the wrist
+// passes apply to elbows). Restores the pre-regression behavior where the
+// bend plane follows the recording; see solveArmIK.
+const _ikLerpE = new THREE.Vector3();
+const _ikLerpE2 = new THREE.Vector3();
+const _ikTargetE = new THREE.Vector3();
+const _ikTargetE2 = new THREE.Vector3();
 const _ikElbowWorld = new THREE.Vector3();
 const _ikWristWorld = new THREE.Vector3();
 const _ikUpperDir = new THREE.Vector3();
@@ -502,29 +509,27 @@ const ANATOMICAL_POLE_RIGHT = new THREE.Vector3(-0.62, 0, 1).normalize();
  * Two-bone IK (shoulder -> elbow -> wrist).
  *
  * Solves the elbow so the WRIST lands exactly on the recorded wrist position,
- * clamped to the arm's real reach.
+ * clamped to the arm's real reach. The wrist solution does not depend on the
+ * pole, so the bend plane below can follow the recording with zero wrist
+ * cost (measured: wrist error 0.0000 m either way).
  *
- * The bend direction is ANATOMICAL, not read from the recording. It used to
- * come from the recorded elbow. Measured with clean data both are fine, but
- * the anatomical pole is exact where the recorded pole is not, and it is
- * immune to elbow data going bad:
- *
- *   recorded-elbow pole : wrist error 0.0069 m, elbow sideways stray 0.258 m
- *   anatomical pole     : wrist error 0.0000 m, elbow sideways stray 0.202 m
- *   both                : 0% of elbows cross the body midline
- *
- * A human elbow always points back and out, so this holds for every pose. It
- * is also what stopped the arms tangling: when the backend briefly clamped
- * torso-relative landmarks into an image frame, the recorded elbow degenerated
- * and 21% of elbows swung across the body, because a folded arm sits ~0.49 m
- * off the shoulder->wrist line and a meaningless direction moves it a long way.
+ * The bend direction is READ FROM THE RECORDING first: the pole is the
+ * perpendicular component of the recorded elbow direction, so elbows point
+ * where the signer held them. This is the pre-regression behavior (the old
+ * build's solveArmIK took the recorded elbow as elbowTarget); the
+ * anatomical-only pole was a later change and is kept purely as the
+ * fallback for missing/collinear elbow data (straight arm), where a
+ * recorded direction cannot exist. Historical note: when the backend once
+ * clamped torso landmarks into an image frame, recorded elbows degenerated
+ * and 21% swung across the body — that clamping is gone, takes arrive
+ * complete, and the fallback below covers any degenerate frame.
  *
  * The pole MUST be orthogonalised against the shoulder->wrist line. Skipping
  * that is not cosmetic: it breaks the triangle, shrinking |elbow-shoulder|
  * below upperLen while growing |elbow-wrist| past foreLen, and the arm
  * visibly detaches from the body.
  */
-function solveArmIK(shoulder, wristTarget, upperLen, foreLen, isLeft, elbowOut, wristOut) {
+function solveArmIK(shoulder, elbowTarget, wristTarget, upperLen, foreLen, isLeft, elbowOut, wristOut) {
   _ikSw.subVectors(wristTarget, shoulder);
   let d = _ikSw.length();
   if (d < 1e-6) {
@@ -540,13 +545,24 @@ function solveArmIK(shoulder, wristTarget, upperLen, foreLen, isLeft, elbowOut, 
   const a = (upperLen * upperLen - foreLen * foreLen + dc * dc) / (2 * dc);
   const h = Math.sqrt(Math.max(0, upperLen * upperLen - a * a));
 
-  _ikPole.copy(isLeft ? ANATOMICAL_POLE_LEFT : ANATOMICAL_POLE_RIGHT);
-  const along = _ikPole.dot(_ikSw);
-  _ikPole.addScaledVector(_ikSw, -along);
-  if (_ikPole.lengthSq() < 1e-8) {
-    // the pole is collinear with shoulder->wrist: bulge via cross(dir, Z)
-    _ikPole.crossVectors(_ikSw, Z_AXIS);
-    if (_ikPole.lengthSq() < 1e-8) _ikPole.set(1, 0, 0);
+  // Primary: recorded elbow direction (orthogonalised). Null/guarded by the
+  // caller, but re-checked here so a degenerate frame can never collapse it.
+  let haveRecordedPole = false;
+  if (elbowTarget) {
+    _ikPole.subVectors(elbowTarget, shoulder);
+    _ikPole.addScaledVector(_ikSw, -_ikPole.dot(_ikSw));
+    if (_ikPole.lengthSq() >= 1e-8) haveRecordedPole = true;
+  }
+  if (!haveRecordedPole) {
+    // Fallback: anatomical out+forward pole (straight arm / missing data).
+    _ikPole.copy(isLeft ? ANATOMICAL_POLE_LEFT : ANATOMICAL_POLE_RIGHT);
+    const along = _ikPole.dot(_ikSw);
+    _ikPole.addScaledVector(_ikSw, -along);
+    if (_ikPole.lengthSq() < 1e-8) {
+      // the pole is collinear with shoulder->wrist: bulge via cross(dir, Z)
+      _ikPole.crossVectors(_ikSw, Z_AXIS);
+      if (_ikPole.lengthSq() < 1e-8) _ikPole.set(1, 0, 0);
+    }
   }
   _ikPole.normalize();
 
@@ -932,6 +948,16 @@ export function Avatar({ signStream, onActiveWordChange }) {
         mapToModel(_ikTargetW, _ikLerpW);
         mapToModel(_ikTargetR, _ikLerpW2);
 
+        // Recorded elbows ride the same rigid midpoint map. None of the
+        // wrist passes below (symmetry, contact, signing space, torso, head)
+        // apply to elbows — those shape wrist targets only. Invalid elbow
+        // data never reaches the solver: applyArmIK returns early through
+        // the rest-pose fallback when any joint is missing.
+        lerpVec(_ikLerpE, frame.body.left_elbow, nextFrame.body.left_elbow);
+        lerpVec(_ikLerpE2, frame.body.right_elbow, nextFrame.body.right_elbow);
+        mapToModel(_ikTargetE, _ikLerpE);
+        mapToModel(_ikTargetE2, _ikLerpE2);
+
         applySymmetryPrior(_ikTargetW, _ikTargetR, symmetryLambdaRef.current);
         const twoHandedWeight = resolveTwoHanded(_ikTargetW, _ikTargetR);
         clampToSigningSpace(_ikTargetW);
@@ -969,7 +995,9 @@ export function Avatar({ signStream, onActiveWordChange }) {
           // unreachable frames tuck instead of flying.
           const S = isLeft ? ik.ls : ik.rs;
           const target = isLeft ? _ikTargetW : _ikTargetR;
-          solveArmIK(S, target,
+          // Recorded elbow steers the bend plane (pre-regression behavior);
+          // the solver falls back to the anatomical pole when it degenerates.
+          solveArmIK(S, isLeft ? _ikTargetE : _ikTargetE2, target,
                      isLeft ? ik.lUpper : ik.rUpper,
                      isLeft ? ik.lFore : ik.rFore,
                      isLeft,

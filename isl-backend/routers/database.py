@@ -221,6 +221,9 @@ def push_hands_clear(l_wrist, r_wrist, l_hand, r_hand, l_shoulder=None, r_should
     r_wrist, r_hand = _cap_to_reach(r_wrist, r_hand, r_shoulder)
     return l_wrist, r_wrist, l_hand, r_hand
 
+_supabase_config_warned = False
+
+
 def load_source_recordings():
     """Source of truth for the avatar.
 
@@ -230,15 +233,36 @@ def load_source_recordings():
     take while Supabase had the user's newest one) and the avatar then animated
     a recording the user had never made.
     """
+    global _supabase_config_warned
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
     if not url or not key:
+        # Loud on purpose. This used to return silently, and that silence is
+        # why new recordings appeared to never reach the pipeline: every
+        # request quietly served the local file while users recorded into
+        # Supabase. One line at startup is the whole diagnosis.
+        if not _supabase_config_warned:
+            _supabase_config_warned = True
+            missing = []
+            if not url:
+                missing.append("SUPABASE_URL")
+            if not key:
+                missing.append("SUPABASE_SERVICE_ROLE_KEY")
+            # DB_DIR is assigned further down this module, so it is not
+            # referenced here: this is an error path and must not be able to
+            # raise a NameError of its own.
+            print(
+                f"[database] Supabase NOT configured (missing: {', '.join(missing)}). "
+                f"Falling back to database/recordings.json for the whole avatar pipeline. "
+                f"Recordings saved to Supabase will NOT be animated. "
+                f"Set the missing value(s) in isl-backend/.env to fix."
+            )
         return load_db(), "file"
 
     try:
         import urllib.request
         req = urllib.request.Request(
-            url.rstrip("/") + "/rest/v1/main_recordings?select=sign_id,hand_count,frames",
+            url.rstrip("/") + "/rest/v1/main_recordings?select=sign_id,hand_count,recording_type,frames,created_at",
             headers={"apikey": key, "Authorization": "Bearer " + key},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -248,12 +272,41 @@ def load_source_recordings():
             out.append({
                 "signId": r.get("sign_id"),
                 "handCount": r.get("hand_count"),
+                "recordingType": normalize_recording_type(r.get("recording_type")),
                 "frames": r.get("frames") or [],
+                # Carried so the golden pick below is latest-wins. File takes
+                # carry recordedAt instead; _take_time_ms reads either shape.
+                "createdAt": r.get("created_at"),
             })
         return out, "supabase"
     except Exception as e:
         print(f"[database] Supabase read failed ({e}); falling back to local file.")
         return load_db(), "file"
+
+
+def _take_time_ms(recording):
+    """Newest-first ordering key for the golden pick. Supabase rows carry an
+    ISO created_at; file takes carry a numeric recordedAt (ms epoch). Either
+    shape (or a missing stamp on very old rows) resolves to epoch millis, so
+    the newest recording always wins regardless of which store served it."""
+    for key in ("createdAt", "created_at", "recordedAt", "recorded_at"):
+        value = recording.get(key) if isinstance(recording, dict) else None
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                continue
+            if text.isdigit():
+                return float(text)
+            try:
+                from datetime import datetime
+                return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp() * 1000
+            except ValueError:
+                continue
+    return 0.0
 
 
 def sync_golden_takes_to_gloss_db():
@@ -274,8 +327,14 @@ def sync_golden_takes_to_gloss_db():
     resting_left_elbow = [0.35, 1.05, 0.0]
     resting_right_elbow = [-0.35, 1.05, 0.0]
     
+    # Latest recording wins per sign (locked rule): the newest take is the
+    # only one Translate ever plays, so older takes can never override or
+    # contradict what is currently being recorded. Ties fall back to longest.
+    # Older takes are NOT deleted — the Interpreter still uses every take as
+    # a recognition template (that is why it is fast and accurate) — but they
+    # never enter this gloss lookup.
     for sign_id, recs in sign_groups.items():
-        best_rec = max(recs, key=lambda x: len(x.get("frames", [])))
+        best_rec = max(recs, key=lambda x: (_take_time_ms(x), len(x.get("frames", []))))
         converted_frames = []
         
         for i, frame in enumerate(best_rec.get("frames", [])):
@@ -368,11 +427,25 @@ def save_db(data):
             os.remove(temp_file)
         raise e
 
+# PRD 18 — Static/Motion classification. The file DB is schemaless, so the
+# flag rides inside each recording dict as `recordingType` (app shape).
+# Reads default missing/foreign values to "motion"; writes normalize it.
+def normalize_recording_type(value):
+    return "static" if isinstance(value, str) and value.lower() == "static" else "motion"
+
+def _stamp_recording_type(recording):
+    if isinstance(recording, dict):
+        recording["recordingType"] = normalize_recording_type(
+            recording.get("recordingType", recording.get("recording_type"))
+        )
+    return recording
+
 # Synchronous helpers that perform the atomic read-modify-write operations
 def _add_recording_sync(recording):
     db = load_db()
     if "id" not in recording:
         recording["id"] = str(uuid.uuid4())
+    _stamp_recording_type(recording)
     db.append(recording)
     save_db(db)
     sync_golden_takes_to_gloss_db() # Phase 2B Auto-Sync
@@ -408,6 +481,7 @@ def _import_recordings_sync(data):
     for r in data:
         if isinstance(r, dict) and "signId" in r and "frames" in r:
             r["id"] = str(uuid.uuid4())
+            _stamp_recording_type(r)
             valid_records.append(r)
     
     if not valid_records:

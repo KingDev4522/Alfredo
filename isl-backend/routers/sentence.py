@@ -25,14 +25,30 @@ import sys
 import threading
 import urllib.error
 import urllib.request
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from utils.env_loader import load_env
+from utils.rate_limit import check as rate_limit_check
 
 load_env()
 
 router = APIRouter()
+
+
+def _limited(route: str, request: Request):
+    """429 when this IP's token bucket for the route is empty. Frontend
+    treats non-2xx as graceful fallback, so limiting never breaks speech."""
+    ip = request.client.host if request and request.client else "unknown"
+    allowed, retry_after = rate_limit_check(route, ip)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(max(1, int(retry_after + 0.5)))},
+            content={"detail": "Rate limit exceeded. Slow down and try again."},
+        )
+    return None
 
 
 def _for_log(text: str) -> str:
@@ -48,14 +64,29 @@ GEMINI_URL_TEMPLATE = (
 )
 
 SYSTEM_PROMPT = (
-    "You convert Indian Sign Language gloss words into one natural spoken "
-    "English sentence. ISL omits prepositions and joining verbs, so insert "
-    "whatever English needs (am, is, need, a, in, ...).\n"
+    "You convert Indian Sign Language gloss input into one natural spoken "
+    "English sentence.\n"
+    "What you receive: a list of tokens. Most are whole words (WATER), but "
+    "some may be INCOMPLETE fragments with missing letters (WATR, HELO), "
+    "JUMBLED letters (WATRE for WATER), or leftovers the backend could not "
+    "complete. The backend already fixes the obvious fragments before you — "
+    "what reaches you should read as words, but tolerate residue.\n"
     "HARD RULES:\n"
-    "1. Use EVERY gloss word. Never drop, ignore, or merge away any word — "
-    "each one must appear in the sentence (inflected naturally if needed).\n"
-    "2. Output ONLY the sentence itself — no quotes, no explanation, no extra text.\n"
-    "3. If the words ask something, end the sentence with a question mark.\n"
+    "1. Use EVERY input token. Never drop, ignore, or merge away any word — "
+    "each one must appear in the sentence (inflected naturally if needed). "
+    "If a token still looks like letter fragments, FIRST reconstruct the "
+    "most probable English word (or two) it stands for, then use the "
+    "reconstruction.\n"
+    "2. Fill in whatever English needs and ISL omits: the subject (assume "
+    '"I" when none is signed — NEED WATER means "I need water"), verbs '
+    "(am, is, need), articles (a, the), prepositions (in, to). An "
+    "incomplete input still becomes a complete sentence.\n"
+    "3. Output ONLY the sentence itself — no quotes, no explanation, no "
+    "extra text, no listing of your reconstruction.\n"
+    "4. If the words ask something, end the sentence with a question mark.\n"
+    "5. If there is only ONE gloss word, output just that word itself "
+    "(single letters stay the bare letter) — never build a sentence around "
+    "one token.\n"
     "Examples:\n"
     "Gloss words: WHERE HOW YOU\n"
     "Where and how are you?\n"
@@ -63,10 +94,16 @@ SYSTEM_PROMPT = (
     "I am in pain.\n"
     "Gloss words: I_ME WATER\n"
     "I need water.\n"
+    "Gloss words: WATER\n"
+    "I need water.\n"
     "Gloss words: THANK_YOU\n"
     "Thank you.\n"
     "Gloss words: WHAT NAME YOU\n"
-    "What is your name?"
+    "What is your name?\n"
+    "Gloss words: WATRE\n"
+    "I need water.\n"
+    "Gloss words: HELO DOCTOR\n"
+    "Hello, I need a doctor."
 )
 
 # Signs whose spoken form is a choice or a pronoun: at least one of these
@@ -75,6 +112,179 @@ _CHOICE_WORDS = {
     "good_bad": ("good", "bad"),
     "i_me": ("i", "me"),
 }
+
+
+# --- Letter-level judging: completing INCOMPLETE letter strings -----------
+# This is NOT anagram/unscrambling. The input is a partial letter sequence
+# (missing letters, e.g. fingerspelled "watr" or a cut-off custom label) and
+# the job is to complete it to the full known word ("water").
+# correct_words() normalizes each input (case/space/underscore/punctuation
+# insensitive), then: (1) exact match keeps it; (2) a UNIQUE prefix of a
+# known word completes it ("hel" -> "hello", only if no other known word
+# starts the same way — ambiguous prefixes are left untouched, we never
+# guess between two words); (3) otherwise the closest known word within
+# edit distance <=1 (short) / <=2 (long) wins — this covers dropped middle
+# letters ("wtr" -> "water"). Anything far stays as-is: we complete letters,
+# we never invent words.
+FIXED_VOCAB_IDS = [
+    "hello", "thank_you", "please", "sorry", "yes", "no",
+    "help", "water", "food", "hungry", "pain", "doctor", "emergency", "stop",
+    "i_me", "you", "name", "what", "where", "how",
+    "one", "two", "three", "four", "good_bad",
+]
+
+
+def _norm_key(text: str) -> str:
+    """Canonical key: lowercase alphanumeric only (thank_you == Thank You)."""
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance, stdlib only. Short strings: O(n*m), trivial."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost))
+        prev = cur
+    return prev[len(b)]
+
+
+def _known_table(extra_words) -> dict:
+    """norm-key -> canonical signId. Fixed vocab first, then caller extras
+    (frontend custom words as ids and/or {id,label}); first writer wins so
+    the fixed vocabulary can never be shadowed by a custom label."""
+    table = {}
+    for sign_id in FIXED_VOCAB_IDS:
+        table.setdefault(_norm_key(sign_id), sign_id)
+    for item in extra_words or []:
+        if isinstance(item, dict):
+            candidates = [item.get("id"), item.get("label")]
+        else:
+            candidates = [item]
+        sign_id = None
+        for c in candidates:
+            if isinstance(c, str) and c.strip():
+                sign_id = c.strip()
+                break
+        if not sign_id:
+            continue
+        for c in candidates:
+            if isinstance(c, str) and c.strip():
+                table.setdefault(_norm_key(c), sign_id)
+    return table
+
+
+def _is_subsequence(short: str, long: str) -> bool:
+    """True if every char of short appears in long, in order (possibly with
+    gaps). 'wtr' is a subsequence of 'water' (dropped vowels); 'het' is
+    NOT a subsequence of 'yes'. This is the core incomplete-letters test."""
+    it = iter(long)
+    return all(ch in it for ch in short)
+
+
+def _single_word(key: str, table: dict):
+    """Complete ONE letter string to a canonical signId, or None.
+    Order: exact -> anagram (WATRE->water) -> unique prefix -> closest
+    (subsequence-aware). Shared by single tokens and blob-split halves."""
+    if not key or key in table:
+        return (table[key] if key in table else None), 0
+    if len(key) <= 1:
+        return None, None
+    # Anagram: same letters, any order — exactly one known word may own the
+    # multiset ("tops" -> "stop"). Shared multisets stay untouched.
+    key_sorted = "".join(sorted(key))
+    anagram = [(kk, sid) for kk, sid in table.items()
+               if len(kk) == len(key) and "".join(sorted(kk)) == key_sorted]
+    if len(anagram) == 1:
+        return anagram[0][1], 0
+    # Unique-prefix completion ("do" -> "doctor"). Ambiguous prefixes
+    # ("he" -> hello/help) fall through instead of guessing.
+    cands = [(kk, sid) for kk, sid in table.items()
+             if len(kk) > len(key) and kk.startswith(key)]
+    if len(cands) == 1:
+        return cands[0][1], 0
+    # Closest-match completion for dropped middle letters. 3+ letters that
+    # read as a subsequence of the known word may be up to distance 2 away;
+    # anything else (incl. every 2-letter input) must be distance <= 1.
+    best_id, best_dist = None, None
+    for known_key, sign_id in table.items():
+        if len(known_key) <= 1:
+            continue
+        dist = _edit_distance(key, known_key)
+        allowed = 2 if (len(key) >= 3 and _is_subsequence(key, known_key)) else 1
+        if dist <= allowed and (best_dist is None or dist < best_dist):
+            best_dist, best_id = dist, sign_id
+    return best_id, best_dist
+
+
+def _split_blob(key: str, table: dict):
+    """Split a run-together two-word blob ("hellowater", "watrehelo") into
+    [word1, word2]. Every split with both halves >= 2 letters is tried; both
+    halves must complete via _single_word (exact/prefix/edit, NOT a further
+    split). Best = smallest total edit distance, ties -> shortest left part.
+    Returns None when nothing clean splits — the token stays untouched for
+    the LLM to judge from context instead of us guessing."""
+    if len(key) < 6:
+        return None
+    best = None
+    for i in range(2, len(key) - 1):
+        left, right = key[:i], key[i:]
+        if len(right) < 2:
+            continue
+        lid, ldist = _single_word(left, table)
+        if lid is None:
+            continue
+        rid, rdist = _single_word(right, table)
+        if rid is None:
+            continue
+        total = (ldist or 0) + (rdist or 0)
+        if best is None or total < best[0]:
+            best = (total, [lid, rid])
+    return best[1] if best else None
+
+
+def correct_words(words: list, extra_words=None) -> tuple:
+    """Return (completed_words, corrections). corrections is a list of
+    {"from": original, "to": canonical} for display. Order preserved."""
+    table = _known_table(extra_words)
+    corrected = []
+    corrections = []
+    for word in words:
+        original = str(word)
+        key = _norm_key(original)
+        if not key:
+            corrected.append(original)
+            continue
+        if key in table:
+            corrected.append(original)
+            continue
+        # (2) Single-word completion: anagram, unique prefix, closest.
+        hit, _dist = _single_word(key, table)
+        if hit is not None:
+            corrected.append(hit)
+            corrections.append({"from": original, "to": hit})
+            continue
+        # (3) Two-word blob split: fingerspelled words run together
+        # ("hellowater" -> hello + water, "watrehelo" -> water + hello).
+        # One token becomes two; the correction note shows both.
+        parts = _split_blob(key, table)
+        if parts:
+            corrected.extend(parts)
+            corrections.append({"from": original, "to": " ".join(parts)})
+            continue
+        # (4) Untouched: ambiguous, far, or non-wordy. The LLM still sees
+        # it in context and _covers still guards the reply; speech falls
+        # back to literal words if no model can use it.
+        corrected.append(original)
+    return corrected, corrections
 
 
 def _required_tokens(words: list) -> list:
@@ -126,6 +336,10 @@ _cache_lock = threading.Lock()
 
 class SentenceRequest(BaseModel):
     words: list
+    # Frontend custom words as ids and/or {id,label} — lets completion know
+    # words the fixed vocabulary doesn't have. Optional; missing = fixed
+    # vocab only. Extra entries never shadow fixed ids (first writer wins).
+    knownWords: list = []
 
 
 class TranslateRequest(BaseModel):
@@ -238,7 +452,10 @@ def _try_translate_provider(provider: str, text: str, timeout: float, max_tokens
 
 
 @router.post("/api/translate")
-def translate_text(req: TranslateRequest):
+def translate_text(req: TranslateRequest, request: Request):
+    limited = _limited("translate", request)
+    if limited is not None:
+        return limited
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text must be a non-empty string")
@@ -410,19 +627,43 @@ def _try_provider(provider: str, words: list, timeout: float, max_tokens: int):
 
 
 @router.post("/api/sentence")
-def make_sentence(req: SentenceRequest):
+def make_sentence(req: SentenceRequest, request: Request):
+    limited = _limited("sentence", request)
+    if limited is not None:
+        return limited
     words = [str(w).strip() for w in (req.words or []) if str(w).strip()]
     if not words:
         raise HTTPException(status_code=400, detail="words must be a non-empty list")
     # Cap length so one request cannot burn the whole rate-limit budget.
     words = words[:40]
+    # Letter-level judging FIRST: complete partial letter strings to full
+    # known words ("watr" -> "water"). The LLM is then told the completed
+    # list, so it can never echo a fragment back. Cache keys on completed
+    # words — "watr" and "water" share one cache entry.
+    completed, corrections = correct_words(words, req.knownWords or [])
+    if corrections:
+        print(f"[sentence] completed letters: {corrections}")
+    words = completed
+    # Locked rule: ONE token is spoken literally, never expanded into a
+    # sentence. No LLM call at all — "A" stays the letter A, "WATER" stays
+    # the word water. Sentences only start at two or more tokens.
+    if len(words) == 1:
+        token = str(words[0])
+        spoken = token.replace("_", " ").strip() or token
+        if len(spoken) == 1:
+            spoken = spoken.upper()
+        elif "_" in token:
+            spoken = spoken[0].upper() + spoken[1:]
+        return {"sentence": spoken, "provider": "literal", "model": "single-word",
+                "cached": False, "corrections": corrections, "completedWords": words}
     cache_key = tuple(w.upper() for w in words)
 
     with _cache_lock:
         hit = _cache.get(cache_key)
     if hit:
         sentence, provider, model = hit
-        return {"sentence": sentence, "provider": provider, "model": model, "cached": True}
+        return {"sentence": sentence, "provider": provider, "model": model, "cached": True,
+                "corrections": corrections, "completedWords": words}
 
     timeout = _timeout()
     max_tokens = _max_tokens()
@@ -440,6 +681,8 @@ def make_sentence(req: SentenceRequest):
                 "provider": provider.lower(),
                 "model": model,
                 "cached": False,
+                "corrections": corrections,
+                "completedWords": words,
             }
 
     raise HTTPException(
